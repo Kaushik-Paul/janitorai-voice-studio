@@ -19,8 +19,8 @@
   'use strict';
 
   const DEFAULTS = {
-    apiUrl: '<API URL>',
-    apiKey: '<Password>',
+    apiUrl: 'https://www.kokoro.pp.ua',
+    apiKey: 'iamawesome',
     voice: 'af_heart',
     speed: 1,
     collapsed: false,
@@ -30,7 +30,8 @@
   const STORAGE_KEY = 'janitor-kokoro-tts-settings-v2';
   const ROOT_ID = 'kokoro-tts-root';
   const MAX_TEXT_CHARS = 5900;
-  const CLIENT_CHUNK_CHARS = 2400;
+  const REQUEST_CHUNK_CHARS = 800;
+  const MAX_PARALLEL_REQUESTS = 2;
   const ACTION_TEXT_PATTERN = /^(copy|edit|copy\s*edit|copyedit|delete|regenerate|continue|retry|swipe|report|more|less)$/i;
 
   let settings = loadSettings();
@@ -520,7 +521,7 @@
 
   function splitTextForRequests(text) {
     const prepared = textForSpeech(text);
-    if (!prepared || prepared.length <= CLIENT_CHUNK_CHARS) return prepared ? [prepared] : [];
+    if (!prepared) return [];
 
     const chunks = [];
     let current = '';
@@ -532,12 +533,12 @@
     }
 
     for (const paragraph of prepared.split(/\n{2,}/u).map((part) => part.trim()).filter(Boolean)) {
-      if (paragraph.length > CLIENT_CHUNK_CHARS) {
+      if (paragraph.length > REQUEST_CHUNK_CHARS) {
         pushCurrent();
-        chunks.push(...splitLongText(paragraph, CLIENT_CHUNK_CHARS));
+        chunks.push(...splitLongText(paragraph, REQUEST_CHUNK_CHARS));
       } else if (!current) {
         current = paragraph;
-      } else if (`${current}\n\n${paragraph}`.length <= CLIENT_CHUNK_CHARS) {
+      } else if (`${current}\n\n${paragraph}`.length <= REQUEST_CHUNK_CHARS) {
         current += `\n\n${paragraph}`;
       } else {
         pushCurrent();
@@ -908,13 +909,26 @@
   }
 
   async function synthesizeChunks(chunks) {
-    const audioBuffers = [];
-
-    for (let index = 0; index < chunks.length; index += 1) {
-      if (stopRequested) break;
-      setStatus(`Generating ${index + 1}/${chunks.length} (${chunks[index].length} chars)...`, 'info');
-      audioBuffers.push(await synthesizeSpeech(chunks[index], index, chunks.length));
+    if (chunks.length === 1) {
+      return [await synthesizeSpeech(chunks[0], 0, 1)];
     }
+
+    const audioBuffers = new Array(chunks.length);
+    const workerCount = Math.min(MAX_PARALLEL_REQUESTS, chunks.length);
+    let nextIndex = 0;
+
+    setStatus(`Generating ${chunks.length} small parts (${workerCount} at a time)...`, 'info');
+
+    async function runWorker() {
+      while (!stopRequested && nextIndex < chunks.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        setStatus(`Generating ${index + 1}/${chunks.length} (${chunks[index].length} chars)...`, 'info');
+        audioBuffers[index] = await synthesizeSpeech(chunks[index], index, chunks.length);
+      }
+    }
+
+    await Promise.all(Array.from({ length: workerCount }, runWorker));
 
     return audioBuffers;
   }
@@ -938,7 +952,7 @@
     try {
       setControlsBusy(true);
       setStatus(chunks.length > 1
-        ? `Generating ${chunks.length} parts, one request at a time...`
+        ? `Generating ${chunks.length} small parts, ${Math.min(MAX_PARALLEL_REQUESTS, chunks.length)} at a time...`
         : `Generating audio (${prepared.length} chars)...`, 'info');
       const audioBuffer = combineAudioBuffers(await synthesizeChunks(chunks));
 
