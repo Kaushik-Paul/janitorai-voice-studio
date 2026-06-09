@@ -111,6 +111,47 @@ def run_command(
     return None
 
 
+def run_text_command(
+    args: list[str],
+    *,
+    dry_run: bool,
+) -> str:
+    printable = " ".join(redact_command(args))
+    print(f"+ {printable}")
+
+    if dry_run:
+        return ""
+
+    completed = subprocess.run(
+        args,
+        check=True,
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    return completed.stdout.strip()
+
+
+def command_succeeds(
+    args: list[str],
+    *,
+    dry_run: bool,
+) -> bool:
+    printable = " ".join(redact_command(args))
+    print(f"+ {printable}")
+
+    if dry_run:
+        return True
+
+    completed = subprocess.run(
+        args,
+        cwd=PROJECT_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return completed.returncode == 0
+
+
 def git_short_sha() -> str | None:
     try:
         completed = subprocess.run(
@@ -192,6 +233,161 @@ def require_tools(
             "Missing required command(s): "
             + ", ".join(missing)
             + ". Install them or add them to PATH."
+        )
+
+
+def ensure_gcloud_account(
+    *,
+    project_id: str,
+    dry_run: bool,
+) -> None:
+    require_tools("gcloud", dry_run=dry_run)
+    active_account = run_text_command(
+        [
+            "gcloud",
+            "auth",
+            "list",
+            "--filter=status:ACTIVE",
+            "--format",
+            "value(account)",
+        ],
+        dry_run=dry_run,
+    )
+
+    if dry_run:
+        return
+
+    if not active_account:
+        raise SystemExit(
+            "No active gcloud account. Run `gcloud auth login`, then rerun "
+            "this script."
+        )
+
+    print(f"Using gcloud account: {active_account.splitlines()[0]}")
+    print(f"Using Google Cloud project: {project_id}")
+
+
+def enable_required_services(
+    *,
+    project_id: str,
+    build_mode: str,
+    dry_run: bool,
+) -> None:
+    services = [
+        "artifactregistry.googleapis.com",
+        "run.googleapis.com",
+    ]
+
+    if build_mode == "cloud-build":
+        services.append("cloudbuild.googleapis.com")
+
+    run_command(
+        [
+            "gcloud",
+            "services",
+            "enable",
+            *services,
+            "--project",
+            project_id,
+        ],
+        dry_run=dry_run,
+    )
+
+
+def ensure_artifact_repository(
+    *,
+    repository: str,
+    region: str,
+    project_id: str,
+    dry_run: bool,
+) -> None:
+    exists = command_succeeds(
+        [
+            "gcloud",
+            "artifacts",
+            "repositories",
+            "describe",
+            repository,
+            "--location",
+            region,
+            "--project",
+            project_id,
+        ],
+        dry_run=dry_run,
+    )
+
+    if exists:
+        return
+
+    print(
+        f"Artifact Registry repository {repository!r} was not found in "
+        f"{region}; creating it."
+    )
+    run_command(
+        [
+            "gcloud",
+            "artifacts",
+            "repositories",
+            "create",
+            repository,
+            "--repository-format",
+            "docker",
+            "--location",
+            region,
+            "--project",
+            project_id,
+            "--description",
+            "Docker images for Kokoro Cloud Run",
+        ],
+        dry_run=dry_run,
+    )
+
+
+def configure_docker_for_artifact_registry(
+    *,
+    region: str,
+    dry_run: bool,
+) -> None:
+    run_command(
+        [
+            "gcloud",
+            "auth",
+            "configure-docker",
+            f"{region}-docker.pkg.dev",
+            "--quiet",
+        ],
+        dry_run=dry_run,
+    )
+
+
+def prepare_gcp(
+    *,
+    project_id: str,
+    repository: str,
+    region: str,
+    build_mode: str,
+    dry_run: bool,
+) -> None:
+    ensure_gcloud_account(
+        project_id=project_id,
+        dry_run=dry_run,
+    )
+    enable_required_services(
+        project_id=project_id,
+        build_mode=build_mode,
+        dry_run=dry_run,
+    )
+    ensure_artifact_repository(
+        repository=repository,
+        region=region,
+        project_id=project_id,
+        dry_run=dry_run,
+    )
+
+    if build_mode == "local":
+        configure_docker_for_artifact_registry(
+            region=region,
+            dry_run=dry_run,
         )
 
 
@@ -551,6 +747,14 @@ def parse_args() -> argparse.Namespace:
         help="Deploy but do not delete old Artifact Registry images.",
     )
     parser.add_argument(
+        "--skip-setup",
+        action="store_true",
+        help=(
+            "Skip gcloud auth check, API enablement, repository check/create, "
+            "and Docker credential setup."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print commands without running them.",
@@ -603,6 +807,15 @@ def main() -> None:
         raise SystemExit(
             "API_PASSWORD is required for deployment. Set API_PASSWORD, "
             "add it to .env, pass --api-password, or pass --set-env-vars."
+        )
+
+    if not args.skip_setup:
+        prepare_gcp(
+            project_id=args.project_id,
+            repository=args.repository,
+            region=args.region,
+            build_mode=args.build_mode,
+            dry_run=args.dry_run,
         )
 
     if args.build_mode == "local":
