@@ -1,0 +1,35 @@
+# Local Python environments
+venv
+.venv
+env
+
+# Python cache
+__pycache__
+*.py[cod]
+*$py.class
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# IDE files
+.idea
+.vscode
+
+# Git
+.git
+.gitignore
+
+# Secrets and local environment files
+.env
+.env.*
+*.secret
+
+# Generated audio
+*.wav
+*.mp3
+*.ogg
+*.flac
+
+# Operating-system files
+.DS_Store
+Thumbs.db
