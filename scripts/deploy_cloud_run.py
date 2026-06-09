@@ -14,7 +14,7 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ENV_VARS = {
-    "TORCH_NUM_THREADS": "1",
+    "TORCH_NUM_THREADS": "2",
     "MAX_TEXT_CHARS": "6000",
 }
 
@@ -446,6 +446,7 @@ def deploy_cloud_run(
     cpu: str,
     memory: str,
     concurrency: int,
+    max_instances: int,
     timeout: int,
     dry_run: bool,
 ) -> None:
@@ -472,6 +473,8 @@ def deploy_cloud_run(
         memory,
         "--concurrency",
         str(concurrency),
+        "--max-instances",
+        str(max_instances),
         "--timeout",
         str(timeout),
     ]
@@ -737,6 +740,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--max-instances",
+        type=int,
+        default=int(
+            env_value("CLOUD_RUN_MAX_INSTANCES", dotenv=dotenv, default="1") or "1"
+        ),
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=int(env_value("CLOUD_RUN_TIMEOUT", dotenv=dotenv, default="300") or "300"),
@@ -842,6 +852,7 @@ def main() -> None:
         cpu=args.cpu,
         memory=args.memory,
         concurrency=args.concurrency,
+        max_instances=args.max_instances,
         timeout=args.timeout,
         dry_run=args.dry_run,
     )

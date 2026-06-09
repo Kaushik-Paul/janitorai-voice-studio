@@ -72,7 +72,7 @@ Runtime environment variables:
 | `API_PASSWORD` | Yes | None | Shared API key expected in the `X-API-Key` header. |
 | `PORT` | No | `8080` | HTTP port used by Cloud Run and Uvicorn. |
 | `MAX_TEXT_CHARS` | No | `6000` | Maximum accepted input text length. |
-| `TORCH_NUM_THREADS` | No | `1` | Number of PyTorch CPU threads. |
+| `TORCH_NUM_THREADS` | No | `2` | Number of PyTorch CPU threads. |
 | `KOKORO_MODEL_DIR` | No | `/opt/kokoro` | Directory containing Kokoro files inside the image. |
 
 Build-time model download uses Hugging Face through
@@ -196,8 +196,9 @@ gcloud run deploy "$SERVICE_NAME" \
   --cpu=2 \
   --memory=4Gi \
   --concurrency=1 \
+  --max-instances=1 \
   --timeout=300 \
-  --set-env-vars="API_PASSWORD=$API_PASSWORD,TORCH_NUM_THREADS=1,MAX_TEXT_CHARS=6000"
+  --set-env-vars="API_PASSWORD=$API_PASSWORD,TORCH_NUM_THREADS=2,MAX_TEXT_CHARS=6000"
 ```
 
 `--allow-unauthenticated` lets HTTP clients reach the FastAPI service. The API
@@ -246,8 +247,8 @@ Then deploy the same `IMAGE_URI` with the Cloud Run command above.
 
 - The service is CPU-only. Start with `--cpu=2` and `--memory=4Gi`, then tune
   after measuring cold starts and synthesis latency.
-- `--concurrency=1` is recommended because the app uses a shared model and
-  serializes inference.
+- `--concurrency=1` and `--max-instances=1` are the lowest-cost stable defaults
+  because the app uses a shared model and serializes inference.
 - Cold starts include loading the bundled Kokoro model from the container
   filesystem.
 - `API_PASSWORD` should be a long random value. For production, prefer storing
