@@ -196,7 +196,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --cpu=2 \
   --memory=4Gi \
   --concurrency=1 \
-  --max-instances=1 \
+  --max-instances=2 \
   --timeout=300 \
   --set-env-vars="API_PASSWORD=$API_PASSWORD,TORCH_NUM_THREADS=2,MAX_TEXT_CHARS=6000"
 ```
@@ -247,8 +247,9 @@ Then deploy the same `IMAGE_URI` with the Cloud Run command above.
 
 - The service is CPU-only. Start with `--cpu=2` and `--memory=4Gi`, then tune
   after measuring cold starts and synthesis latency.
-- `--concurrency=1` and `--max-instances=1` are the lowest-cost stable defaults
-  because the app uses a shared model and serializes inference.
+- `--concurrency=1` gives each request a full instance. `--max-instances=2`
+  lets the userscript process small client-side chunks two at a time while
+  still allowing scale-to-zero when idle.
 - Cold starts include loading the bundled Kokoro model from the container
   filesystem.
 - `API_PASSWORD` should be a long random value. For production, prefer storing

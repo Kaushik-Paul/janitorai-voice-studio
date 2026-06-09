@@ -743,7 +743,7 @@ def parse_args() -> argparse.Namespace:
         "--max-instances",
         type=int,
         default=int(
-            env_value("CLOUD_RUN_MAX_INSTANCES", dotenv=dotenv, default="1") or "1"
+            env_value("CLOUD_RUN_MAX_INSTANCES", dotenv=dotenv, default="2") or "2"
         ),
     )
     parser.add_argument(
