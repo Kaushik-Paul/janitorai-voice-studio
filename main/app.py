@@ -19,6 +19,26 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 MODEL_ID = "hexgrad/Kokoro-82M"
+MODEL_DIRECTORY = os.getenv(
+    "KOKORO_MODEL_DIR",
+    "/opt/kokoro",
+)
+
+MODEL_CONFIG_PATH = os.path.join(
+    MODEL_DIRECTORY,
+    "config.json",
+)
+
+MODEL_WEIGHTS_PATH = os.path.join(
+    MODEL_DIRECTORY,
+    "kokoro-v1_0.pth",
+)
+
+VOICE_DIRECTORY = os.path.join(
+    MODEL_DIRECTORY,
+    "voices",
+)
+
 SAMPLE_RATE = 24_000
 
 MAX_TEXT_CHARS = int(
@@ -189,10 +209,8 @@ def require_api_key(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Load Kokoro once when the Cloud Run container starts.
-
-    The same KModel instance is shared between the American
-    and British language pipelines.
+    Load Kokoro exclusively from local files bundled into
+    the Docker image.
     """
 
     torch.set_num_threads(TORCH_NUM_THREADS)
@@ -200,17 +218,36 @@ async def lifespan(app: FastAPI):
     try:
         torch.set_num_interop_threads(1)
     except RuntimeError:
-        # PyTorch allows this to be configured only before
-        # parallel work begins.
         pass
 
+    required_files = [
+        MODEL_CONFIG_PATH,
+        MODEL_WEIGHTS_PATH,
+    ]
+
+    missing_files = [
+        path
+        for path in required_files
+        if not os.path.isfile(path)
+    ]
+
+    if missing_files:
+        raise RuntimeError(
+            "Required Kokoro model files are missing: "
+            + ", ".join(missing_files)
+        )
+
     shared_model = (
-        KModel(repo_id=MODEL_ID)
+        KModel(
+            repo_id=MODEL_ID,
+            config=MODEL_CONFIG_PATH,
+            model=MODEL_WEIGHTS_PATH,
+        )
         .to("cpu")
         .eval()
     )
 
-    app.state.pipelines = {
+    pipelines = {
         "a": KPipeline(
             lang_code="a",
             repo_id=MODEL_ID,
@@ -225,14 +262,38 @@ async def lifespan(app: FastAPI):
         ),
     }
 
-    # Load the default voice into RAM during startup so that
-    # the first speech request does not need to load it.
-    app.state.pipelines["a"].load_voice("af_heart")
+    # Load every supported voice from local files.
+    #
+    # Adding each tensor under its ordinary voice ID prevents
+    # KPipeline from calling Hugging Face at request time.
+    for voice_name, voice_info in VOICES.items():
+        voice_path = os.path.join(
+            VOICE_DIRECTORY,
+            f"{voice_name}.pt",
+        )
+
+        if not os.path.isfile(voice_path):
+            raise RuntimeError(
+                f"Voice file is missing: {voice_path}"
+            )
+
+        voice_tensor = torch.load(
+            voice_path,
+            map_location="cpu",
+            weights_only=True,
+        )
+
+        language_code = voice_info["language_code"]
+
+        pipelines[language_code].voices[
+            voice_name
+        ] = voice_tensor
+
+    app.state.pipelines = pipelines
 
     yield
 
     app.state.pipelines.clear()
-    del shared_model
 
 
 app = FastAPI(
