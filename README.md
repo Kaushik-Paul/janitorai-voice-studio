@@ -13,9 +13,23 @@ The project has two pieces:
   [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) and returns generated
   speech as WAV audio.
 
-The userscript keeps JanitorAI markdown-like text such as `**bold**`,
-`*italics*`, timestamps, narration, and dialogue so the TTS backend receives
-the same emotional/contextual cues shown in the chat.
+## What This Is For
+
+JanitorAI does not provide this Kokoro voice workflow by default. This project
+adds a small browser-side control panel that turns chat text into speech through
+your own private backend.
+
+Use it when you want to:
+
+- listen to JanitorAI bot replies instead of reading every message,
+- generate voice from selected parts of a chat,
+- paste custom text and hear it in a Kokoro voice,
+- keep control of the TTS API key and backend deployment,
+- avoid sending chat text to a public third-party TTS website.
+
+Tampermonkey is the browser extension that runs the frontend script on
+JanitorAI pages. Cloud Run hosts the backend that actually performs the Kokoro
+text-to-speech generation.
 
 ## How It Works
 
@@ -32,6 +46,10 @@ the same emotional/contextual cues shown in the chat.
 
 This keeps individual backend requests small enough to avoid large memory
 spikes while still using two Cloud Run instances when long text is available.
+
+The userscript keeps JanitorAI markdown-like text such as `**bold**`,
+`*italics*`, timestamps, narration, and dialogue so the TTS backend receives
+the same emotional/contextual cues shown in the chat.
 
 ## Features
 
@@ -135,16 +153,46 @@ TORCH_NUM_THREADS: 2
 MAX_TEXT_CHARS: 6000
 ```
 
-### 2. Install The Userscript
+### 2. Install Tampermonkey
 
-1. Open Tampermonkey in your browser.
-2. Create a new userscript.
-3. Replace its contents with `userscripts/janitor-kokoro-tts.user.js`.
-4. Save it.
-5. Open or refresh JanitorAI.
-6. In the Kokoro TTS panel, open Advanced and confirm:
-   - API URL points to your Cloud Run domain.
-   - API key matches `API_PASSWORD`.
+Tampermonkey lets you run custom JavaScript on specific websites. In this
+project, it runs the JanitorAI frontend script only on:
+
+```text
+https://janitorai.com/*
+https://www.janitorai.com/*
+```
+
+Install Tampermonkey for your browser:
+
+- Chrome, Brave, Edge, or other Chromium browsers: install Tampermonkey from
+  the Chrome Web Store.
+- Firefox: install Tampermonkey from Firefox Add-ons.
+
+After installation, pin the Tampermonkey extension if you want quick access to
+the script dashboard.
+
+### 3. Add The Userscript
+
+1. Click the Tampermonkey extension icon.
+2. Open `Dashboard`.
+3. Click the `+` button or `Create a new script`.
+4. Delete the default template Tampermonkey creates.
+5. Copy the entire contents of `userscripts/janitor-kokoro-tts.user.js`.
+6. Paste it into the Tampermonkey editor.
+7. Save the script with `File` -> `Save`, or press `Ctrl+S`.
+8. Make sure the script is enabled in the Tampermonkey dashboard.
+9. Open or refresh JanitorAI.
+
+If the script is installed correctly, a floating `Kokoro TTS` panel appears in
+the bottom-right corner of JanitorAI.
+
+### 4. Configure The Userscript
+
+Open the `Advanced` section in the Kokoro TTS panel and confirm:
+
+- `API URL` points to your Cloud Run domain.
+- `API key` matches the backend `API_PASSWORD`.
 
 The userscript is already configured for:
 
@@ -156,7 +204,18 @@ For another deployment, update the default `apiUrl` and `apiKey` in the
 userscript before copying it into Tampermonkey, or change them from the panel's
 Advanced section.
 
-### 3. Use It In JanitorAI
+The userscript metadata must also allow your backend domain through
+Tampermonkey's `@connect` rules. This repo already includes:
+
+```javascript
+// @connect      www.kokoro.pp.ua
+// @connect      kokoro.pp.ua
+```
+
+If you use a different API domain, add matching `@connect` entries before
+saving the script in Tampermonkey.
+
+### 5. Use It In JanitorAI
 
 - `Read latest` reads the latest rendered bot message.
 - `Read selected` reads highlighted text.
@@ -164,6 +223,17 @@ Advanced section.
 - `Stop` aborts active requests and stops playback.
 - Use the controller to replay, pause/play, seek, or skip after audio is
   generated.
+
+Typical usage:
+
+1. Open a JanitorAI chat.
+2. Wait for the bot response to finish rendering.
+3. Click `Read latest`.
+4. Adjust `Voice` or `Speed` if needed.
+5. Use `Replay`, `Pause`, the seek bar, or the skip buttons after generation.
+
+If `Read latest` picks the wrong message, paste the text into the text box and
+click `Read box`.
 
 ## Backend API
 
