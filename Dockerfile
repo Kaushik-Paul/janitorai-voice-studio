@@ -26,45 +26,25 @@ RUN python -m pip install --upgrade \
     && python -m pip install \
         -r /app/requirements.txt
 
+# Install the spaCy English model required by Kokoro/Misaki.
 RUN python -m pip install \
     https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 
-RUN python - <<'PY'
-import spacy
-
-nlp = spacy.load("en_core_web_sm")
-print("spaCy English model loaded successfully")
-print(nlp.pipe_names)
-PY
-
+# Verify the spaCy model during the build.
+RUN python -c "import spacy; nlp = spacy.load('en_core_web_sm'); print('spaCy model loaded:', nlp.pipe_names)"
 
 RUN mkdir -p /opt/kokoro/voices
 
-RUN python - <<'PY'
-from huggingface_hub import snapshot_download
+COPY scripts/download_model.py /app/scripts/download_model.py
 
-path = snapshot_download(
-    repo_id="hexgrad/Kokoro-82M",
-    local_dir="/opt/kokoro",
-    allow_patterns=[
-        "config.json",
-        "kokoro-v1_0.pth",
-        "voices/af_*.pt",
-        "voices/am_*.pt",
-        "voices/bf_*.pt",
-        "voices/bm_*.pt",
-    ],
-)
+RUN python /app/scripts/download_model.py
 
-print(f"Kokoro files downloaded to: {path}")
-PY
-
+# Fail the build if required Kokoro files are absent.
 RUN test -f /opt/kokoro/config.json \
     && test -f /opt/kokoro/kokoro-v1_0.pth \
     && test -f /opt/kokoro/voices/af_heart.pt \
     && echo "Kokoro model files verified successfully" \
-    && du -sh /opt/kokoro \
-    && find /opt/kokoro -maxdepth 2 -type f | sort
+    && du -sh /opt/kokoro
 
 COPY main /app/main
 
