@@ -1,21 +1,12 @@
-FROM python:3.11-slim-bookworm
-
+FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    HF_HOME=/opt/huggingface \
-    TRANSFORMERS_CACHE=/opt/huggingface/transformers
-
+    KOKORO_MODEL_DIR=/opt/kokoro
 
 WORKDIR /app
 
-
-# espeak-ng:
-# Required by Kokoro's English text frontend.
-#
-# libsndfile1:
-# Required by the Python soundfile package.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -23,14 +14,8 @@ RUN apt-get update \
         libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-
 COPY requirements.txt /app/requirements.txt
 
-
-# Install CPU-only PyTorch first.
-#
-# Installing the normal PyPI build can pull unnecessary
-# CUDA-related packages into the image.
 RUN python -m pip install --upgrade \
         pip \
         setuptools \
@@ -41,17 +26,26 @@ RUN python -m pip install --upgrade \
     && python -m pip install \
         -r /app/requirements.txt
 
+RUN python -m pip install \
+    https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 
-# Download the model weights and all English voices while
-# building the Docker image.
-#
-# The application therefore does not need to download model
-# files during every Cloud Run cold start.
+RUN python - <<'PY'
+import spacy
+
+nlp = spacy.load("en_core_web_sm")
+print("spaCy English model loaded successfully")
+print(nlp.pipe_names)
+PY
+
+
+RUN mkdir -p /opt/kokoro/voices
+
 RUN python - <<'PY'
 from huggingface_hub import snapshot_download
 
-snapshot_download(
+path = snapshot_download(
     repo_id="hexgrad/Kokoro-82M",
+    local_dir="/opt/kokoro",
     allow_patterns=[
         "config.json",
         "kokoro-v1_0.pth",
@@ -61,36 +55,32 @@ snapshot_download(
         "voices/bm_*.pt",
     ],
 )
+
+print(f"Kokoro files downloaded to: {path}")
 PY
 
-
-# Disallow runtime Hugging Face downloads. All supported files
-# have already been saved in the Docker image.
-ENV HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1
-
+RUN test -f /opt/kokoro/config.json \
+    && test -f /opt/kokoro/kokoro-v1_0.pth \
+    && test -f /opt/kokoro/voices/af_heart.pt \
+    && echo "Kokoro model files verified successfully" \
+    && du -sh /opt/kokoro \
+    && find /opt/kokoro -maxdepth 2 -type f | sort
 
 COPY main /app/main
 
-
-# Do not run the web service as root.
 RUN useradd \
         --create-home \
         --uid 10001 \
         appuser \
     && chown -R appuser:appuser \
         /app \
-        /opt/huggingface
+        /opt/kokoro
 
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
 USER appuser
 
-
 EXPOSE 8080
 
-
-# Cloud Run supplies the PORT environment variable.
-#
-# main.app:app is required because app.py is inside the
-# main Python package.
 CMD ["sh", "-c", "exec uvicorn main.app:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1"]
