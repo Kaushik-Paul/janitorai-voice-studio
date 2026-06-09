@@ -194,26 +194,12 @@ Open the `Advanced` section in the Kokoro TTS panel and confirm:
 - `API URL` points to your Cloud Run domain.
 - `API key` matches the backend `API_PASSWORD`.
 
-The userscript is already configured for:
-
-```text
-https://www.kokoro.pp.ua
-```
-
-For another deployment, update the default `apiUrl` and `apiKey` in the
-userscript before copying it into Tampermonkey, or change them from the panel's
-Advanced section.
+Update the default `apiUrl` and `apiKey` in the userscript before copying it
+into Tampermonkey, or change them from the panel's Advanced section.
 
 The userscript metadata must also allow your backend domain through
-Tampermonkey's `@connect` rules. This repo already includes:
-
-```javascript
-// @connect      www.kokoro.pp.ua
-// @connect      kokoro.pp.ua
-```
-
-If you use a different API domain, add matching `@connect` entries before
-saving the script in Tampermonkey.
+Tampermonkey's `@connect` rules. Add matching `@connect` entries before saving
+the script in Tampermonkey.
 
 ### 5. Use It In JanitorAI
 
