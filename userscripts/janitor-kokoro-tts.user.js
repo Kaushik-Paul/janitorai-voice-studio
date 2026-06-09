@@ -23,7 +23,6 @@
     apiKey: '<Password>',
     voice: 'af_heart',
     speed: 1,
-    chunkChars: 420,
     collapsed: false,
     manualText: '',
   };
@@ -31,8 +30,7 @@
   const STORAGE_KEY = 'janitor-kokoro-tts-settings-v2';
   const ROOT_ID = 'kokoro-tts-root';
   const MAX_TEXT_CHARS = 5900;
-  const MIN_CHUNK_CHARS = 100;
-  const MAX_CHUNK_CHARS = 600;
+  const CLIENT_CHUNK_CHARS = 2400;
   const ACTION_TEXT_PATTERN = /^(copy|edit|copy\s*edit|copyedit|delete|regenerate|continue|retry|swipe|report|more|less)$/i;
 
   let settings = loadSettings();
@@ -60,18 +58,16 @@
   let playbackStartedAt = 0;
   let playbackTimer = null;
   let isPlaybackPaused = true;
-  let activeRequest = null;
+  const activeRequests = new Set();
   let stopRequested = false;
   let voicesLoaded = false;
 
   function loadSettings() {
     try {
-      const loaded = {
+      return {
         ...DEFAULTS,
         ...JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'),
       };
-      loaded.chunkChars = clampChunkSize(loaded.chunkChars);
-      return loaded;
     } catch {
       return { ...DEFAULTS };
     }
@@ -299,9 +295,27 @@
     return bodyChildren.at(-1) || body;
   }
 
+  function messageWrapperFromAvatar(avatar) {
+    return (
+      avatar.closest('li[class*="messageDisplayWrapper" i]')
+      || avatar.closest('[class*="messageDisplayWrapper" i]')
+      || avatar.closest('[data-index]')?.querySelector('li[class*="messageDisplayWrapper" i], [class*="messageDisplayWrapper" i]')
+      || avatar.closest('[data-index]')
+    );
+  }
+
   function messageWrapperText(wrapper) {
     const content = messageContentElement(wrapper);
     return cleanExtractedMessageText(markdownFromNode(content));
+  }
+
+  function messageVirtualIndex(wrapper) {
+    const indexedParent = wrapper.closest('[data-index]');
+    const index = Number.parseInt(indexedParent?.getAttribute('data-index') || '', 10);
+    if (Number.isFinite(index)) return index;
+
+    const rect = wrapper.getBoundingClientRect();
+    return Math.round(window.scrollY + rect.top);
   }
 
   function isBotMessageWrapper(wrapper) {
@@ -311,19 +325,32 @@
   }
 
   function findLatestRenderedBotText() {
-    const wrappers = Array.from(document.querySelectorAll([
+    const avatarWrappers = Array.from(document.querySelectorAll(
+      'img[src*="/bot-avatars/"], img[alt="Character Icon"]',
+    )).map(messageWrapperFromAvatar).filter(Boolean);
+
+    const wrappers = Array.from(new Set([
+      ...avatarWrappers,
+      ...Array.from(document.querySelectorAll([
       'li[class*="messageDisplayWrapper" i]',
       '[class*="botChoicesSlider" i] li',
       '[class*="messageDisplayWrapper" i]',
-    ].join(','))).filter((element) => (
+      ].join(','))),
+    ])).filter((element) => (
       element instanceof HTMLElement
       && !element.closest(`#${ROOT_ID}`)
-      && visible(element)
       && isBotMessageWrapper(element)
+    )).map((element, order) => ({
+      element,
+      order,
+      index: messageVirtualIndex(element),
+    })).sort((left, right) => (
+      right.index - left.index
+      || right.order - left.order
     ));
 
-    for (let index = wrappers.length - 1; index >= 0; index -= 1) {
-      const text = messageWrapperText(wrappers[index]);
+    for (const candidate of wrappers) {
+      const text = messageWrapperText(candidate.element);
       if (isUsefulMessageText(text)) return text;
     }
 
@@ -450,20 +477,14 @@
     return text;
   }
 
-  function clampChunkSize(value) {
-    const number = Number.parseInt(value, 10);
-    if (!Number.isFinite(number)) return DEFAULTS.chunkChars;
-    return Math.min(MAX_CHUNK_CHARS, Math.max(MIN_CHUNK_CHARS, number));
-  }
-
-  function splitLongParagraph(paragraph, maxLength) {
+  function splitLongText(value, maxLength) {
     const chunks = [];
-    const sentences = paragraph.match(/[^.!?\n]+(?:[.!?]+["'”’)]*|$)/gu) || [paragraph];
+    const sentences = value.match(/[^.!?\n]+(?:[.!?]+["'”’)]*|$)/gu) || [value];
     let current = '';
 
     function pushCurrent() {
-      const value = current.trim();
-      if (value) chunks.push(value);
+      const text = current.trim();
+      if (text) chunks.push(text);
       current = '';
     }
 
@@ -473,11 +494,11 @@
 
       if (sentence.length > maxLength) {
         pushCurrent();
-        const words = sentence.split(/\s+/u);
-        for (const word of words) {
-          if (!current) current = word;
-          else if (`${current} ${word}`.length <= maxLength) current += ` ${word}`;
-          else {
+        for (const word of sentence.split(/\s+/u)) {
+          const next = current ? `${current} ${word}` : word;
+          if (next.length <= maxLength) {
+            current = next;
+          } else {
             pushCurrent();
             current = word;
           }
@@ -497,28 +518,26 @@
     return chunks;
   }
 
-  function splitIntoChunks(text) {
-    const normalized = textForSpeech(text);
-    if (!normalized) return [];
+  function splitTextForRequests(text) {
+    const prepared = textForSpeech(text);
+    if (!prepared || prepared.length <= CLIENT_CHUNK_CHARS) return prepared ? [prepared] : [];
 
-    const maxLength = clampChunkSize(settings.chunkChars);
-    const paragraphs = normalized.split(/\n{2,}/u).map((part) => part.trim()).filter(Boolean);
     const chunks = [];
     let current = '';
 
     function pushCurrent() {
-      const value = current.trim();
-      if (value) chunks.push(value);
+      const text = current.trim();
+      if (text) chunks.push(text);
       current = '';
     }
 
-    for (const paragraph of paragraphs) {
-      if (paragraph.length > maxLength) {
+    for (const paragraph of prepared.split(/\n{2,}/u).map((part) => part.trim()).filter(Boolean)) {
+      if (paragraph.length > CLIENT_CHUNK_CHARS) {
         pushCurrent();
-        chunks.push(...splitLongParagraph(paragraph, maxLength));
+        chunks.push(...splitLongText(paragraph, CLIENT_CHUNK_CHARS));
       } else if (!current) {
         current = paragraph;
-      } else if (`${current}\n\n${paragraph}`.length <= maxLength) {
+      } else if (`${current}\n\n${paragraph}`.length <= CLIENT_CHUNK_CHARS) {
         current += `\n\n${paragraph}`;
       } else {
         pushCurrent();
@@ -568,7 +587,7 @@
       const retries = Number(options.retries || 0);
 
       function attempt(attemptIndex) {
-        activeRequest = GM_xmlhttpRequest({
+        const request = GM_xmlhttpRequest({
           method: options.method || 'GET',
           url,
           headers: options.headers || {},
@@ -576,7 +595,7 @@
           responseType: 'arraybuffer',
           timeout: options.timeout || 240000,
           onload: async (response) => {
-            activeRequest = null;
+            activeRequests.delete(request);
             if (response.status >= 200 && response.status < 300) {
               resolve(response);
               return;
@@ -592,7 +611,7 @@
             reject(new Error(responseError(response)));
           },
           onerror: async () => {
-            activeRequest = null;
+            activeRequests.delete(request);
             if (!stopRequested && attemptIndex < retries) {
               setStatus(`Network hiccup; retrying ${attemptIndex + 1}/${retries}...`, 'warn');
               await wait(900 * (attemptIndex + 1));
@@ -603,7 +622,7 @@
             reject(new Error('Network request failed.'));
           },
           ontimeout: async () => {
-            activeRequest = null;
+            activeRequests.delete(request);
             if (!stopRequested && attemptIndex < retries) {
               setStatus(`Kokoro timed out; retrying ${attemptIndex + 1}/${retries}...`, 'warn');
               await wait(900 * (attemptIndex + 1));
@@ -614,10 +633,11 @@
             reject(new Error('Kokoro request timed out.'));
           },
           onabort: () => {
-            activeRequest = null;
+            activeRequests.delete(request);
             reject(new Error('Kokoro request aborted.'));
           },
         });
+        activeRequests.add(request);
       }
 
       attempt(0);
@@ -865,7 +885,7 @@
     });
   }
 
-  async function synthesizeChunk(text, index, total) {
+  async function synthesizeSpeech(text, index = 0, total = 1) {
     const url = `${cleanBaseUrl(settings.apiUrl)}/v1/audio/speech`;
     const response = await requestArrayBuffer(url, {
       method: 'POST',
@@ -883,8 +903,20 @@
     });
 
     validateAudioResponse(response);
-    setStatus(`Decoding ${index + 1}/${total}...`, 'info');
+    setStatus(total > 1 ? `Decoding ${index + 1}/${total}...` : 'Decoding audio...', 'info');
     return decodeAudioBuffer(getAudioContext(), response.response);
+  }
+
+  async function synthesizeChunks(chunks) {
+    const audioBuffers = [];
+
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (stopRequested) break;
+      setStatus(`Generating ${index + 1}/${chunks.length} (${chunks[index].length} chars)...`, 'info');
+      audioBuffers.push(await synthesizeSpeech(chunks[index], index, chunks.length));
+    }
+
+    return audioBuffers;
   }
 
   async function speakText(text, label = 'text') {
@@ -896,7 +928,7 @@
 
     saveFromControls();
     stopRequested = false;
-    const chunks = splitIntoChunks(prepared);
+    const chunks = splitTextForRequests(prepared);
 
     if (!chunks.length) {
       setStatus(`No ${label} to read.`, 'warn');
@@ -905,21 +937,16 @@
 
     try {
       setControlsBusy(true);
-      const audioBuffers = [];
-      for (let index = 0; index < chunks.length; index += 1) {
-        if (stopRequested) break;
-        setStatus(`Generating ${index + 1}/${chunks.length} (${chunks[index].length} chars)...`, 'info');
-        audioBuffers.push(await synthesizeChunk(chunks[index], index, chunks.length));
-        if (!stopRequested && index < chunks.length - 1) {
-          await wait(250);
-        }
-      }
+      setStatus(chunks.length > 1
+        ? `Generating ${chunks.length} parts, one request at a time...`
+        : `Generating audio (${prepared.length} chars)...`, 'info');
+      const audioBuffer = combineAudioBuffers(await synthesizeChunks(chunks));
 
       if (stopRequested) {
         setStatus('Stopped.', 'warn');
       } else {
-        setStatus(`Playing combined audio (${chunks.length} chunk${chunks.length === 1 ? '' : 's'}).`, 'ok');
-        await playCombinedAudio(combineAudioBuffers(audioBuffers));
+        setStatus('Playing audio...', 'ok');
+        await playCombinedAudio(audioBuffer);
         if (!stopRequested) setStatus('Finished playback. Use the controller to replay or seek.', 'ok');
       }
     } catch (error) {
@@ -927,17 +954,16 @@
       else setStatus(`TTS failed: ${error.message}`, 'error');
     } finally {
       setControlsBusy(false);
-      activeRequest = null;
     }
   }
 
   function stopPlayback() {
     stopRequested = true;
     cleanupAudio(true);
-    if (activeRequest && typeof activeRequest.abort === 'function') {
-      activeRequest.abort();
+    for (const request of activeRequests) {
+      if (request && typeof request.abort === 'function') request.abort();
     }
-    activeRequest = null;
+    activeRequests.clear();
     setControlsBusy(false);
     setStatus('Stopped.', 'warn');
   }
@@ -1034,7 +1060,6 @@
     settings.apiKey = apiKeyInputEl.value.trim();
     settings.voice = voiceSelectEl.value || DEFAULTS.voice;
     settings.speed = Number(speedInputEl.value) || DEFAULTS.speed;
-    settings.chunkChars = clampChunkSize(settings.chunkChars);
     settings.manualText = manualTextEl.value;
     saveSettings();
   }
