@@ -52,7 +52,7 @@ MAX_SYNTHESIS_CHARS = int(
 
 TORCH_NUM_THREADS = max(
     1,
-    int(os.getenv("TORCH_NUM_THREADS", "1")),
+    int(os.getenv("TORCH_NUM_THREADS", "2")),
 )
 
 API_PASSWORD = os.getenv("API_PASSWORD")

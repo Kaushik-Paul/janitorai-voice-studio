@@ -145,7 +145,7 @@ Current Cloud Run defaults are tuned for the JanitorAI userscript:
 
 ```text
 CPU: 2
-Memory: 4Gi
+Memory: 5Gi
 Concurrency: 1
 Max instances: 4
 Timeout: 300 seconds
@@ -369,7 +369,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --allow-unauthenticated \
   --port=8080 \
   --cpu=2 \
-  --memory=4Gi \
+  --memory=5Gi \
   --concurrency=1 \
   --max-instances=4 \
   --timeout=300 \

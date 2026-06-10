@@ -730,7 +730,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--memory",
-        default=env_value("CLOUD_RUN_MEMORY", dotenv=dotenv, default="4Gi"),
+        default=env_value("CLOUD_RUN_MEMORY", dotenv=dotenv, default="5Gi"),
     )
     parser.add_argument(
         "--concurrency",
