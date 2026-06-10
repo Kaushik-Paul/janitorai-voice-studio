@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JanitorAI Kokoro TTS
-// @namespace    url
-// @version      1.5.0
+// @namespace    https://www.kokoro.pp.ua/
+// @version      1.6.0
 // @description  Read JanitorAI messages, selected text, or typed text with a private Kokoro Cloud Run API.
 // @author       Kaushik Paul
 // @match        https://janitorai.com/*
@@ -12,6 +12,7 @@
 // @grant        unsafeWindow
 // @connect      www.url
 // @connect      url
+// @connect      openrouter.ai
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -25,11 +26,34 @@
     speed: 1,
     collapsed: false,
     manualText: '',
+    useOpenRouter: false,
+    openRouterApiKey: '',
   };
+
+  const OPENROUTER_API_KEY_OVERRIDE = '';
+  const OPENROUTER_MODEL = 'hexgrad/kokoro-82m';
+  const OPENROUTER_SPEECH_URL = 'https://openrouter.ai/api/v1/audio/speech';
+  const OPENROUTER_VOICES = [
+    ['af_heart', 'American female'],
+    ['af_alloy', 'American female'],
+    ['af_aoede', 'American female'],
+    ['af_bella', 'American female'],
+    ['af_jessica', 'American female'],
+    ['af_kore', 'American female'],
+    ['af_nicole', 'American female'],
+    ['af_nova', 'American female'],
+    ['af_river', 'American female'],
+    ['af_sarah', 'American female'],
+    ['af_sky', 'American female'],
+    ['bf_alice', 'British female'],
+    ['bf_emma', 'British female'],
+    ['bf_isabella', 'British female'],
+    ['bf_lily', 'British female'],
+  ];
 
   const STORAGE_KEY = 'janitor-kokoro-tts-settings-v2';
   const ROOT_ID = 'kokoro-tts-root';
-  const USER_SCRIPT_VERSION = '1.5.27';
+  const USER_SCRIPT_VERSION = '1.6.0';
   const MAX_TEXT_CHARS = 5900;
   const REQUEST_CHUNK_CHARS = 600;
   const MAX_PARALLEL_REQUESTS = 4;
@@ -44,6 +68,8 @@
   let speedInputEl;
   let apiUrlInputEl;
   let apiKeyInputEl;
+  let openRouterToggleEl;
+  let openRouterApiKeyInputEl;
   let replayButtonEl;
   let backButtonEl;
   let pauseButtonEl;
@@ -82,6 +108,19 @@
 
   function cleanBaseUrl(value) {
     return String(value || DEFAULTS.apiUrl).trim().replace(/\/+$/, '');
+  }
+
+  function openRouterApiKey() {
+    return String(OPENROUTER_API_KEY_OVERRIDE || settings.openRouterApiKey || '').trim();
+  }
+
+  function effectivePlaybackRate() {
+    if (!settings.useOpenRouter) return 1;
+    return Math.min(Math.max(Number(settings.speed) || 1, 0.25), 4);
+  }
+
+  function activePlaybackRate() {
+    return Number(activeAudioSource?.playbackRate?.value) || effectivePlaybackRate();
   }
 
   function setStatus(message, tone = 'info') {
@@ -702,7 +741,11 @@
 
     try {
       const parsed = JSON.parse(bodyText);
-      const detail = typeof parsed.detail === 'string' ? parsed.detail : JSON.stringify(parsed.detail || parsed);
+      const detail = typeof parsed.detail === 'string'
+        ? parsed.detail
+        : typeof parsed.error?.message === 'string'
+          ? parsed.error.message
+          : JSON.stringify(parsed.detail || parsed.error || parsed);
       return `HTTP ${response.status}: ${detail}`;
     } catch {
       return `HTTP ${response.status}: ${bodyText.slice(0, 500)}`;
@@ -719,6 +762,7 @@
     return new Promise((resolve, reject) => {
       const retryStatuses = new Set(options.retryStatuses || []);
       const retries = Number(options.retries || 0);
+      const serviceName = options.serviceName || 'Kokoro';
 
       function attempt(attemptIndex) {
         const request = GM_xmlhttpRequest({
@@ -737,7 +781,7 @@
             }
 
             if (!stopRequested && attemptIndex < retries && retryStatuses.has(response.status)) {
-              setStatus(`Kokoro returned ${response.status}; retrying ${attemptIndex + 1}/${retries}...`, 'warn');
+              setStatus(`${serviceName} returned ${response.status}; retrying ${attemptIndex + 1}/${retries}...`, 'warn');
               await wait(900 * (attemptIndex + 1));
               attempt(attemptIndex + 1);
               return;
@@ -748,7 +792,7 @@
           onerror: async () => {
             activeRequests.delete(request);
             if (!stopRequested && attemptIndex < retries) {
-              setStatus(`Network hiccup; retrying ${attemptIndex + 1}/${retries}...`, 'warn');
+              setStatus(`${serviceName} network hiccup; retrying ${attemptIndex + 1}/${retries}...`, 'warn');
               await wait(900 * (attemptIndex + 1));
               attempt(attemptIndex + 1);
               return;
@@ -759,7 +803,7 @@
           ontimeout: async () => {
             activeRequests.delete(request);
             if (!stopRequested && attemptIndex < retries) {
-              setStatus(`Kokoro timed out; retrying ${attemptIndex + 1}/${retries}...`, 'warn');
+              setStatus(`${serviceName} timed out; retrying ${attemptIndex + 1}/${retries}...`, 'warn');
               await wait(900 * (attemptIndex + 1));
               attempt(attemptIndex + 1);
               return;
@@ -779,28 +823,34 @@
     });
   }
 
-  function validateAudioResponse(response) {
+  function validateAudioResponse(response, options = {}) {
+    const serviceName = options.serviceName || 'Kokoro';
+    const requireWav = options.requireWav !== false;
     const contentType = String(
       response.responseHeaders?.match(/^content-type:\s*([^\r\n]+)/im)?.[1] || ''
     ).toLowerCase();
 
     const buffer = response.response;
     if (!(buffer instanceof ArrayBuffer)) {
-      throw new Error('Kokoro returned a non-binary response.');
+      throw new Error(`${serviceName} returned a non-binary response.`);
     }
 
-    if (!contentType.includes('audio/')) {
-      throw new Error(`Kokoro returned ${contentType || 'unknown content type'} instead of audio: ${decodeResponseBody(response).slice(0, 300)}`);
+    if (!contentType.includes('audio/') && !contentType.includes('application/octet-stream')) {
+      throw new Error(`${serviceName} returned ${contentType || 'unknown content type'} instead of audio: ${decodeResponseBody(response).slice(0, 300)}`);
     }
 
     if (buffer.byteLength < 44) {
-      throw new Error(`Kokoro returned incomplete audio (${buffer.byteLength} bytes).`);
+      throw new Error(`${serviceName} returned incomplete audio (${buffer.byteLength} bytes).`);
+    }
+
+    if (!requireWav) {
+      return;
     }
 
     const header = new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 12));
     const signature = String.fromCharCode(...header);
     if (!signature.startsWith('RIFF') || signature.slice(8, 12) !== 'WAVE') {
-      throw new Error(`Kokoro returned audio data that is not WAV (${signature}).`);
+      throw new Error(`${serviceName} returned audio data that is not WAV (${signature}).`);
     }
   }
 
@@ -818,7 +868,7 @@
     }
 
     return Math.min(
-      playbackOffset + (activeAudioContext.currentTime - playbackStartedAt),
+      playbackOffset + ((activeAudioContext.currentTime - playbackStartedAt) * activePlaybackRate()),
       activeAudioBuffer.duration,
     );
   }
@@ -862,6 +912,15 @@
       activeAudioSource.disconnect();
       activeAudioSource = null;
     }
+  }
+
+  function syncActivePlaybackRate() {
+    if (!activeAudioSource || !activeAudioContext || isPlaybackPaused) return;
+
+    playbackOffset = currentPlaybackOffset();
+    playbackStartedAt = activeAudioContext.currentTime;
+    activeAudioSource.playbackRate.value = effectivePlaybackRate();
+    updatePlaybackControls();
   }
 
   function cleanupAudio(resolvePlayback = false) {
@@ -1089,6 +1148,7 @@
     const source = context.createBufferSource();
     activeAudioSource = source;
     source.buffer = activeAudioBuffer;
+    source.playbackRate.value = effectivePlaybackRate();
     source.connect(context.destination);
     playbackStartedAt = context.currentTime;
     isPlaybackPaused = false;
@@ -1164,6 +1224,38 @@
     return response.response;
   }
 
+  async function synthesizeOpenRouterSpeech(text) {
+    const apiKey = openRouterApiKey();
+    if (!apiKey) {
+      throw new Error('OpenRouter API key is required when OpenRouter is selected.');
+    }
+
+    const response = await requestArrayBuffer(OPENROUTER_SPEECH_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': location.origin,
+        'X-Title': 'JanitorAI Kokoro TTS',
+      },
+      data: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        input: text,
+        voice: settings.voice,
+        response_format: 'mp3',
+      }),
+      retries: 2,
+      retryStatuses: [429, 500, 502, 503, 504, 524, 529],
+      serviceName: 'OpenRouter',
+      timeout: 240000,
+      useFetchTransport: true,
+    });
+
+    validateAudioResponse(response, { serviceName: 'OpenRouter', requireWav: false });
+    setStatus('Received OpenRouter audio.', 'info');
+    return response.response;
+  }
+
   async function synthesizeChunks(chunks) {
     if (chunks.length === 1) {
       return [await synthesizeSpeech(chunks[0], 0, 1)];
@@ -1207,6 +1299,11 @@
     }
   }
 
+  async function decodeOpenRouterAudio(audioBytes) {
+    setStatus('Decoding OpenRouter audio...', 'info');
+    return await decodeAudioBuffer(getAudioContext(), audioBytes);
+  }
+
   async function speakText(text, label = 'text') {
     const prepared = textForSpeech(text);
     if (!prepared) {
@@ -1216,6 +1313,33 @@
 
     saveFromControls();
     stopRequested = false;
+    const usingOpenRouter = Boolean(settings.useOpenRouter);
+
+    if (usingOpenRouter && !openRouterApiKey()) {
+      setStatus('OpenRouter API key is required when OpenRouter is selected.', 'error');
+      return;
+    }
+
+    if (usingOpenRouter) {
+      try {
+        setControlsBusy(true);
+        setStatus(`Generating OpenRouter audio (${prepared.length} chars)...`, 'info');
+        const audioBuffer = await decodeOpenRouterAudio(await synthesizeOpenRouterSpeech(prepared));
+
+        if (stopRequested) {
+          setStatus('Stopped.', 'warn');
+        } else {
+          await playCombinedAudio(audioBuffer);
+        }
+      } catch (error) {
+        if (stopRequested) setStatus('Stopped.', 'warn');
+        else setStatus(`OpenRouter TTS failed: ${error.message}`, 'error');
+      } finally {
+        setControlsBusy(false);
+      }
+      return;
+    }
+
     const chunks = splitTextForRequests(prepared);
 
     if (!chunks.length) {
@@ -1341,13 +1465,17 @@
   function saveFromControls() {
     settings.apiUrl = cleanBaseUrl(apiUrlInputEl.value);
     settings.apiKey = apiKeyInputEl.value.trim();
+    settings.useOpenRouter = Boolean(openRouterToggleEl?.checked);
+    settings.openRouterApiKey = openRouterApiKeyInputEl?.value.trim() || '';
     settings.voice = voiceSelectEl.value || DEFAULTS.voice;
     settings.speed = Number(speedInputEl.value) || DEFAULTS.speed;
     settings.manualText = manualTextEl.value;
     saveSettings();
+    syncActivePlaybackRate();
   }
 
   async function loadVoices() {
+    if (settings.useOpenRouter) return;
     if (voicesLoaded) return;
     setStatus('Loading voices...', 'info');
 
@@ -1394,6 +1522,27 @@
     }
   }
 
+  function loadOpenRouterVoices() {
+    if (!voiceSelectEl) return;
+
+    const currentVoice = settings.voice || DEFAULTS.voice;
+    voiceSelectEl.textContent = '';
+
+    for (const [voiceId, label] of OPENROUTER_VOICES) {
+      const option = document.createElement('option');
+      option.value = voiceId;
+      option.textContent = `${voiceId} - ${label}`;
+      voiceSelectEl.append(option);
+    }
+
+    settings.voice = OPENROUTER_VOICES.some(([voiceId]) => voiceId === currentVoice)
+      ? currentVoice
+      : DEFAULTS.voice;
+    voiceSelectEl.value = settings.voice;
+    voicesLoaded = false;
+    saveSettings();
+  }
+
   function createButton(label, action) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -1408,6 +1557,15 @@
     const span = document.createElement('span');
     span.textContent = label;
     wrapper.append(span, input);
+    return wrapper;
+  }
+
+  function createCheckboxField(label, input) {
+    const wrapper = document.createElement('label');
+    wrapper.className = 'kokoro-toggle-field';
+    const span = document.createElement('span');
+    span.textContent = label;
+    wrapper.append(input, span);
     return wrapper;
   }
 
@@ -1558,6 +1716,21 @@
         font-size: 12px;
       }
 
+      #${ROOT_ID} .kokoro-toggle-field {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 32px;
+        color: #cbd5e1;
+        font-size: 12px;
+      }
+
+      #${ROOT_ID} .kokoro-toggle-field input {
+        width: auto;
+        min-height: auto;
+        margin: 0;
+      }
+
       #${ROOT_ID} .kokoro-advanced {
         display: grid;
         gap: 8px;
@@ -1678,6 +1851,19 @@
     apiKeyInputEl.type = 'password';
     apiKeyInputEl.autocomplete = 'off';
 
+    openRouterToggleEl = document.createElement('input');
+    openRouterToggleEl.type = 'checkbox';
+    openRouterToggleEl.checked = Boolean(settings.useOpenRouter);
+
+    openRouterApiKeyInputEl = document.createElement('input');
+    openRouterApiKeyInputEl.value = settings.openRouterApiKey || '';
+    openRouterApiKeyInputEl.type = 'password';
+    openRouterApiKeyInputEl.autocomplete = 'off';
+    openRouterApiKeyInputEl.placeholder = OPENROUTER_API_KEY_OVERRIDE
+      ? 'Using script key override'
+      : 'sk-or-...';
+    openRouterApiKeyInputEl.disabled = Boolean(OPENROUTER_API_KEY_OVERRIDE);
+
     voiceSelectEl = document.createElement('select');
     const defaultVoiceOption = document.createElement('option');
     defaultVoiceOption.value = settings.voice;
@@ -1707,6 +1893,8 @@
     const advancedBody = document.createElement('div');
     advancedBody.className = 'kokoro-advanced-body';
     advancedBody.append(
+      createCheckboxField('Use OpenRouter', openRouterToggleEl),
+      createField('OpenRouter API key', openRouterApiKeyInputEl),
       createField('API URL', apiUrlInputEl),
       createField('API key', apiKeyInputEl),
     );
@@ -1748,6 +1936,17 @@
 
     root.addEventListener('change', () => {
       saveFromControls();
+    });
+
+    openRouterToggleEl.addEventListener('change', () => {
+      saveFromControls();
+      if (settings.useOpenRouter) {
+        loadOpenRouterVoices();
+        setStatus('OpenRouter mode selected.', 'info');
+      } else {
+        voicesLoaded = false;
+        loadVoices();
+      }
     });
 
     progressInputEl.addEventListener('pointerdown', () => {
@@ -1826,14 +2025,16 @@
 
       if (action === 'read-latest') {
         if (!await prepareAudioFromClick()) return;
-        await loadVoices();
+        saveFromControls();
+        if (!settings.useOpenRouter) await loadVoices();
         await speakText(findLatestText(), 'latest message');
         return;
       }
 
       if (action === 'read-selected') {
         if (!await prepareAudioFromClick()) return;
-        await loadVoices();
+        saveFromControls();
+        if (!settings.useOpenRouter) await loadVoices();
         const text = getCurrentSelectionText();
         setTextPreview('Selected text', text);
         await speakText(text, 'selected text');
@@ -1842,7 +2043,8 @@
 
       if (action === 'read-box') {
         if (!await prepareAudioFromClick()) return;
-        await loadVoices();
+        saveFromControls();
+        if (!settings.useOpenRouter) await loadVoices();
         setTextPreview('Text box', manualTextEl.value);
         await speakText(manualTextEl.value, 'text box');
       }
@@ -1853,7 +2055,8 @@
     document.addEventListener('pointerup', updateRememberedSelection, true);
 
     findLatestText();
-    loadVoices();
+    if (settings.useOpenRouter) loadOpenRouterVoices();
+    else loadVoices();
   }
 
   if (document.readyState === 'loading') {
