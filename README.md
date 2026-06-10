@@ -1,8 +1,9 @@
 # JanitorAI Kokoro TTS
 
 Add text-to-speech controls to [JanitorAI](https://janitorai.com/) with a
-Tampermonkey userscript and a private Kokoro backend running on Google Cloud
-Run.
+Tampermonkey userscript. Audio can be generated either through OpenRouter's
+hosted `hexgrad/kokoro-82m` model or through a private Kokoro backend running
+on Google Cloud Run.
 
 The project has two pieces:
 
@@ -11,24 +12,28 @@ The project has two pieces:
   into its box.
 - `main/app.py` exposes a password-protected FastAPI service that runs
   [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) and returns generated
-  speech as WAV audio.
+  speech as WAV audio. This backend is optional if you use OpenRouter mode.
 
 ## What This Is For
 
 JanitorAI does not provide this Kokoro voice workflow by default. This project
-adds a small browser-side control panel that turns chat text into speech through
-your own private backend.
+adds a small browser-side control panel that turns chat text into speech
+through either OpenRouter or your own private backend.
 
 Use it when you want to:
 
 - listen to JanitorAI bot replies instead of reading every message,
 - generate voice from selected parts of a chat,
 - paste custom text and hear it in a Kokoro voice,
-- keep control of the TTS API key and backend deployment,
-- avoid sending chat text to a public third-party TTS website.
+- use OpenRouter when you want setup to be just Tampermonkey plus an
+  OpenRouter API key,
+- keep control of the TTS API key and backend deployment when using Cloud Run,
+- avoid sending chat text to a public third-party TTS website when using your
+  own Cloud Run backend.
 
 Tampermonkey is the browser extension that runs the frontend script on
-JanitorAI pages. Cloud Run hosts the backend that actually performs the Kokoro
+JanitorAI pages. OpenRouter mode calls OpenRouter directly from the browser.
+Cloud Run mode calls your private backend, which performs the Kokoro
 text-to-speech generation.
 
 ## How It Works
@@ -36,16 +41,19 @@ text-to-speech generation.
 1. JanitorAI renders a chat message in the browser.
 2. The Tampermonkey userscript finds the latest bot message, selected text, or
    text from its manual input box.
-3. Long text is split client-side into small natural chunks of about 600
-   characters.
-4. The userscript sends up to four TTS requests at a time to the Cloud Run API.
-5. The backend generates WAV audio with Kokoro.
-6. The userscript decodes and combines the returned chunks, then plays the
+3. In OpenRouter mode, the userscript sends the full prepared text directly to
+   OpenRouter's `hexgrad/kokoro-82m` audio endpoint.
+4. In Cloud Run mode, long text is split client-side into small natural chunks
+   of about 600 characters.
+5. The userscript sends up to four TTS requests at a time to the Cloud Run API.
+6. The backend generates WAV audio with Kokoro.
+7. The userscript decodes and combines the returned audio, then plays the
    final audio through a Web Audio controller with replay, pause/play, seek,
    and 10-second skip controls.
 
-This keeps individual backend requests small enough to reduce memory spikes
-while still using up to four Cloud Run instances when long text is available.
+Cloud Run chunking keeps individual backend requests small enough to reduce
+memory spikes while still using up to four Cloud Run instances when long text
+is available. OpenRouter mode does not use Cloud Run chunking.
 
 The userscript keeps JanitorAI markdown-like text such as `**bold**`,
 `*italics*`, timestamps, narration, and dialogue so the TTS backend receives
@@ -64,10 +72,15 @@ the same emotional/contextual cues shown in the chat.
 - Speed control.
 - Audio controller with replay, pause/play, seek, back 10 seconds, and forward
   10 seconds.
-- API URL and API key stored under the collapsed Advanced section.
-- Client-side chunking around 600 characters, with at most four active TTS
-  requests.
+- Advanced toggle for OpenRouter or Cloud Run mode.
+- Masked OpenRouter API key field, saved locally in browser storage.
+- Cloud Run API URL and API key fields, saved locally in browser storage.
+- OpenRouter mode sends the full text directly to OpenRouter and does not call
+  the Cloud Run backend.
+- Cloud Run mode uses client-side chunking around 600 characters, with at most
+  four active TTS requests.
 - Web Audio playback, avoiding browser media URL safety blocks.
+- OpenRouter speed is applied in the browser with Web Audio playback rate.
 - Filters JanitorAI UI actions such as `Copy`, `Edit`, and `CopyEdit` from
   spoken text.
 
@@ -107,7 +120,41 @@ extraction.
 
 ## Quick Start
 
-### 1. Deploy The Backend
+### Option A: Use OpenRouter Only
+
+Use this path if you do not want to deploy the Cloud Run backend.
+
+1. Install the userscript with Tampermonkey.
+2. Open JanitorAI and expand the Kokoro TTS panel's `Advanced` section.
+3. Enable `Use OpenRouter`.
+4. Enter your OpenRouter API key in `OpenRouter API key`.
+5. Leave the Cloud Run `API URL` and `API key` fields alone; they are not used
+   while OpenRouter mode is enabled.
+
+In OpenRouter mode, the userscript calls:
+
+```text
+https://openrouter.ai/api/v1/audio/speech
+```
+
+with:
+
+```text
+model: hexgrad/kokoro-82m
+```
+
+The full prepared text is sent in one request. The Cloud Run backend,
+`/v1/voices`, and `/v1/audio/speech` are skipped.
+
+The userscript installation steps are the same as Cloud Run mode. The only
+difference is that you can skip deploying the backend and leave the Cloud Run
+API fields unused.
+
+### Option B: Use Your Own Cloud Run Backend
+
+Use this path if you want the browser to send text only to your own backend.
+
+#### 1. Deploy The Backend
 
 Create a `.env` file or export these values:
 
@@ -153,7 +200,7 @@ TORCH_NUM_THREADS: 2
 MAX_TEXT_CHARS: 6000
 ```
 
-### 2. Install Tampermonkey
+#### 2. Install Tampermonkey
 
 Tampermonkey lets you run custom JavaScript on specific websites. In this
 project, it runs the JanitorAI frontend script only on:
@@ -172,7 +219,7 @@ Install Tampermonkey for your browser:
 After installation, pin the Tampermonkey extension if you want quick access to
 the script dashboard.
 
-### 3. Add The Userscript
+#### 3. Add The Userscript
 
 1. Click the Tampermonkey extension icon.
 2. Open `Dashboard`.
@@ -187,17 +234,19 @@ the script dashboard.
 If the script is installed correctly, a floating `Kokoro TTS` panel appears in
 the bottom-right corner of JanitorAI.
 
-### 4. Configure The Userscript
+#### 4. Configure The Userscript
 
 Open the `Advanced` section in the Kokoro TTS panel and confirm:
 
+- `Use OpenRouter` is off.
 - `API URL` points to your Cloud Run domain.
 - `API key` matches the backend `API_PASSWORD`.
 
-The userscript is already configured for:
+The userscript defaults use placeholders:
 
 ```text
-https://www.kokoro.pp.ua
+<Url>
+<password>
 ```
 
 For another deployment, update the default `apiUrl` and `apiKey` in the
@@ -205,17 +254,18 @@ userscript before copying it into Tampermonkey, or change them from the panel's
 Advanced section.
 
 The userscript metadata must also allow your backend domain through
-Tampermonkey's `@connect` rules. This repo already includes:
+Tampermonkey's `@connect` rules. Add entries for your backend domain and keep
+the OpenRouter entry if you plan to use OpenRouter mode:
 
 ```javascript
-// @connect      www.kokoro.pp.ua
-// @connect      kokoro.pp.ua
+// @connect      your-api.example.com
+// @connect      openrouter.ai
 ```
 
 If you use a different API domain, add matching `@connect` entries before
 saving the script in Tampermonkey.
 
-### 5. Use It In JanitorAI
+#### 5. Use It In JanitorAI
 
 - `Read latest` reads the latest rendered bot message.
 - `Read selected` reads highlighted text.
@@ -460,6 +510,9 @@ Then deploy the same `IMAGE_URI` with the Cloud Run command above.
   capture a fresh JanitorAI HTML snapshot for selector tuning.
 - If voices fail to load, confirm the API URL, API key, and Tampermonkey
   `@connect` domains match your backend domain.
+- If OpenRouter mode fails immediately, confirm `Use OpenRouter` is enabled,
+  `OpenRouter API key` is filled, and `@connect openrouter.ai` is present in
+  the userscript metadata.
 
 ## License
 
