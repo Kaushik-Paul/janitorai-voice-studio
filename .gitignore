@@ -129,13 +129,9 @@ fabric.properties
 .idea/caches/build_file_checksums.ser
 
 ### PyCharm+all Patch ###
-# Ignore everything but code style settings and run configurations
-# that are supposed to be shared within teams.
+# Ignore the entire .idea folder
 
-.idea/*
-
-!.idea/codeStyles
-!.idea/runConfigurations
+.idea/
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
