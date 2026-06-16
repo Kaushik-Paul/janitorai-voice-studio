@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JanitorAI Kokoro TTS
 // @namespace    <namespace if any>
-// @version      1.6.10
+// @version      1.6.12
 // @description  Read JanitorAI messages, selected text, or typed text with a private Kokoro Cloud Run API.
 // @author       Kaushik Paul
 // @match        https://janitorai.com/*
@@ -75,12 +75,13 @@
 
   const STORAGE_KEY = 'janitor-kokoro-tts-settings-v2';
   const ROOT_ID = 'kokoro-tts-root';
-  const USER_SCRIPT_VERSION = '1.6.10';
+  const USER_SCRIPT_VERSION = '1.6.12';
   const MAX_TEXT_CHARS = 5900;
   const REQUEST_CHUNK_CHARS = 600;
   const MAX_PARALLEL_REQUESTS = 4;
   const ACTION_TEXT_PATTERN = /^(copy|edit|copy\s*edit|copyedit|delete|regenerate|continue|retry|swipe|report|more|less)$/i;
   const CLOUD_RUN_BACKEND = 'cloudRun';
+  const PANEL_EDGE_MARGIN = 8;
 
   let settings = loadSettings();
   let root;
@@ -124,6 +125,7 @@
   let voicesLoaded = false;
   let voiceListLoadToken = 0;
   let activeVoiceBackend = voiceBackendFromSettings(settings);
+  let panelDragState = null;
 
   function loadSettings() {
     try {
@@ -1880,6 +1882,69 @@
     }
   }
 
+  function clampedPanelPosition(left, top) {
+    const rect = root?.getBoundingClientRect?.();
+    const width = rect?.width || 360;
+    const height = rect?.height || 80;
+    const maxLeft = Math.max(PANEL_EDGE_MARGIN, window.innerWidth - width - PANEL_EDGE_MARGIN);
+    const maxTop = Math.max(PANEL_EDGE_MARGIN, window.innerHeight - Math.min(height, window.innerHeight - (PANEL_EDGE_MARGIN * 2)) - PANEL_EDGE_MARGIN);
+
+    return {
+      left: Math.min(Math.max(Number(left) || PANEL_EDGE_MARGIN, PANEL_EDGE_MARGIN), maxLeft),
+      top: Math.min(Math.max(Number(top) || PANEL_EDGE_MARGIN, PANEL_EDGE_MARGIN), maxTop),
+    };
+  }
+
+  function setPanelPosition(left, top) {
+    if (!root) return;
+
+    const position = clampedPanelPosition(left, top);
+    root.style.left = `${position.left}px`;
+    root.style.top = `${position.top}px`;
+    root.style.right = 'auto';
+    root.style.bottom = 'auto';
+  }
+
+  function keepPanelInViewport() {
+    if (!root || !root.style.left || !root.style.top) return;
+
+    const rect = root.getBoundingClientRect();
+    setPanelPosition(rect.left, rect.top);
+  }
+
+  function startPanelDrag(event, handle) {
+    if (!root) return;
+    if (event.button !== undefined && event.button !== 0) return;
+    if (event.target?.closest?.('button, input, select, textarea, summary, a')) return;
+
+    const rect = root.getBoundingClientRect();
+    panelDragState = {
+      pointerId: event.pointerId,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+    };
+    root.dataset.dragging = 'true';
+    handle.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  }
+
+  function dragPanel(event) {
+    if (!panelDragState || event.pointerId !== panelDragState.pointerId) return;
+    setPanelPosition(event.clientX - panelDragState.offsetX, event.clientY - panelDragState.offsetY);
+    event.preventDefault();
+  }
+
+  function stopPanelDrag(event, handle) {
+    if (!panelDragState || event.pointerId !== panelDragState.pointerId) return;
+
+    handle.releasePointerCapture?.(event.pointerId);
+    const rect = root.getBoundingClientRect();
+    panelDragState = null;
+    delete root.dataset.dragging;
+    setPanelPosition(rect.left, rect.top);
+    event.preventDefault();
+  }
+
   function buildUi() {
     if (document.getElementById(ROOT_ID)) return;
 
@@ -1910,6 +1975,10 @@
         display: none;
       }
 
+      #${ROOT_ID}[data-dragging="true"] {
+        user-select: none;
+      }
+
       #${ROOT_ID} .kokoro-header {
         display: flex;
         align-items: center;
@@ -1918,6 +1987,8 @@
         padding: 10px 12px;
         border-bottom: 1px solid rgba(255, 255, 255, 0.12);
         cursor: move;
+        touch-action: none;
+        user-select: none;
       }
 
       #${ROOT_ID} .kokoro-title {
@@ -2303,6 +2374,22 @@
     root.append(header, body);
     document.body.append(root);
 
+    header.addEventListener('pointerdown', (event) => {
+      startPanelDrag(event, header);
+    });
+
+    header.addEventListener('pointermove', dragPanel);
+
+    header.addEventListener('pointerup', (event) => {
+      stopPanelDrag(event, header);
+    });
+
+    header.addEventListener('pointercancel', (event) => {
+      stopPanelDrag(event, header);
+    });
+
+    window.addEventListener('resize', keepPanelInViewport);
+
     root.addEventListener('pointerdown', (event) => {
       if (event.target?.closest?.('[data-action="read-selected"]')) {
         event.preventDefault();
@@ -2382,6 +2469,7 @@
         root.classList.toggle('kokoro-collapsed', settings.collapsed);
         button.textContent = settings.collapsed ? 'Open' : 'Hide';
         saveSettings();
+        requestAnimationFrame(keepPanelInViewport);
         return;
       }
 
