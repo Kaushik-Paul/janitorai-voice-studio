@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JanitorAI Kokoro TTS
 // @namespace    <namespace if any>
-// @version      1.6.8
+// @version      1.6.10
 // @description  Read JanitorAI messages, selected text, or typed text with a private Kokoro Cloud Run API.
 // @author       Kaushik Paul
 // @match        https://janitorai.com/*
@@ -32,6 +32,9 @@
     useOpenRouter: false,
     openRouterApiKey: '',
     mimoApiKey: '',
+    cloudRunVoice: 'af_heart',
+    openRouterVoice: 'af_heart',
+    mimoVoice: 'Chloe',
   };
 
   const OPENROUTER_API_KEY_OVERRIDE = '';
@@ -72,11 +75,12 @@
 
   const STORAGE_KEY = 'janitor-kokoro-tts-settings-v2';
   const ROOT_ID = 'kokoro-tts-root';
-  const USER_SCRIPT_VERSION = '1.6.8';
+  const USER_SCRIPT_VERSION = '1.6.10';
   const MAX_TEXT_CHARS = 5900;
   const REQUEST_CHUNK_CHARS = 600;
   const MAX_PARALLEL_REQUESTS = 4;
   const ACTION_TEXT_PATTERN = /^(copy|edit|copy\s*edit|copyedit|delete|regenerate|continue|retry|swipe|report|more|less)$/i;
+  const CLOUD_RUN_BACKEND = 'cloudRun';
 
   let settings = loadSettings();
   let root;
@@ -118,6 +122,8 @@
   const activeRequests = new Set();
   let stopRequested = false;
   let voicesLoaded = false;
+  let voiceListLoadToken = 0;
+  let activeVoiceBackend = voiceBackendFromSettings(settings);
 
   function loadSettings() {
     try {
@@ -132,10 +138,50 @@
       }
       loaded.byokProvider = loaded.byokProvider === 'mimo' ? 'mimo' : 'openrouter';
       loaded.useOpenRouter = Boolean(loaded.useByok && loaded.byokProvider === 'openrouter');
+      loaded.cloudRunVoice = loaded.cloudRunVoice || (!loaded.useByok ? loaded.voice : DEFAULTS.cloudRunVoice);
+      loaded.openRouterVoice = loaded.openRouterVoice || (loaded.useByok && loaded.byokProvider === 'openrouter' ? loaded.voice : DEFAULTS.openRouterVoice);
+      loaded.mimoVoice = loaded.mimoVoice || (loaded.useByok && loaded.byokProvider === 'mimo' ? loaded.voice : DEFAULTS.mimoVoice);
+      loaded.voice = voiceForBackend(loaded, voiceBackendFromSettings(loaded));
       return loaded;
     } catch {
       return { ...DEFAULTS };
     }
+  }
+
+  function voiceBackendFromSettings(value = settings) {
+    if (!value.useByok) return CLOUD_RUN_BACKEND;
+    return value.byokProvider === 'mimo' ? 'mimo' : 'openrouter';
+  }
+
+  function voiceForBackend(value, backend) {
+    if (backend === 'mimo') return value.mimoVoice || DEFAULTS.mimoVoice;
+    if (backend === 'openrouter') return value.openRouterVoice || DEFAULTS.openRouterVoice;
+    return value.cloudRunVoice || value.voice || DEFAULTS.cloudRunVoice;
+  }
+
+  function rememberVoiceForBackend(backend, voice) {
+    const nextVoice = voice || DEFAULTS.voice;
+    if (backend === 'mimo') {
+      settings.mimoVoice = nextVoice;
+    } else if (backend === 'openrouter') {
+      settings.openRouterVoice = nextVoice;
+    } else {
+      settings.cloudRunVoice = nextVoice;
+    }
+    settings.voice = nextVoice;
+  }
+
+  function showRememberedVoice(backend) {
+    if (!voiceSelectEl) return;
+
+    const voice = voiceForBackend(settings, backend);
+    voiceSelectEl.textContent = '';
+    const option = document.createElement('option');
+    option.value = voice;
+    option.textContent = voice;
+    voiceSelectEl.append(option);
+    voiceSelectEl.value = voice;
+    activeVoiceBackend = backend;
   }
 
   function saveSettings() {
@@ -1627,6 +1673,9 @@
   }
 
   function saveFromControls() {
+    if (voiceSelectEl) {
+      rememberVoiceForBackend(activeVoiceBackend, voiceSelectEl.value || voiceForBackend(settings, activeVoiceBackend));
+    }
     settings.apiUrl = cleanBaseUrl(apiUrlInputEl.value);
     settings.apiKey = apiKeyInputEl.value.trim();
     settings.useByok = Boolean(byokToggleEl?.checked);
@@ -1634,14 +1683,14 @@
     settings.useOpenRouter = useOpenRouterByok();
     settings.openRouterApiKey = openRouterApiKeyInputEl?.value.trim() || '';
     settings.mimoApiKey = mimoApiKeyInputEl?.value.trim() || '';
-    settings.voice = voiceSelectEl.value || DEFAULTS.voice;
+    settings.voice = voiceForBackend(settings, voiceBackendFromSettings(settings));
     settings.speed = Number(speedInputEl.value) || DEFAULTS.speed;
     settings.manualText = manualTextEl.value;
     saveSettings();
     syncActivePlaybackRate();
   }
 
-  async function loadVoices() {
+  async function loadVoices(loadToken = ++voiceListLoadToken) {
     if (settings.useByok) return;
     if (voicesLoaded) return;
     setStatus('Loading voices...', 'info');
@@ -1665,6 +1714,7 @@
         });
 
       if (!voices.length) throw new Error('No voices returned.');
+      if (settings.useByok || loadToken !== voiceListLoadToken) return;
 
       voiceSelectEl.textContent = '';
       for (const [voiceId, info] of voices) {
@@ -1674,13 +1724,16 @@
         voiceSelectEl.append(option);
       }
 
-      if (!voices.some(([voiceId]) => voiceId === settings.voice)) {
-        settings.voice = payload.default_voice && voices.some(([voiceId]) => voiceId === payload.default_voice)
+      const rememberedVoice = voiceForBackend(settings, CLOUD_RUN_BACKEND);
+      const selectedVoice = voices.some(([voiceId]) => voiceId === rememberedVoice)
+        ? rememberedVoice
+        : payload.default_voice && voices.some(([voiceId]) => voiceId === payload.default_voice)
           ? payload.default_voice
           : voices[0][0];
-      }
 
-      voiceSelectEl.value = settings.voice;
+      rememberVoiceForBackend(CLOUD_RUN_BACKEND, selectedVoice);
+      voiceSelectEl.value = selectedVoice;
+      activeVoiceBackend = CLOUD_RUN_BACKEND;
       voicesLoaded = true;
       saveSettings();
       setStatus(`Loaded ${voices.length} female voices.`, 'ok');
@@ -1689,12 +1742,14 @@
     }
   }
 
-  function selectVoiceFromList(voices, fallbackVoice) {
-    const currentVoice = settings.voice || fallbackVoice;
-    settings.voice = voices.some(([voiceId]) => voiceId === currentVoice)
+  function selectVoiceFromList(voices, fallbackVoice, backend) {
+    const currentVoice = voiceForBackend(settings, backend);
+    const selectedVoice = voices.some(([voiceId]) => voiceId === currentVoice)
       ? currentVoice
       : fallbackVoice;
-    voiceSelectEl.value = settings.voice;
+    rememberVoiceForBackend(backend, selectedVoice);
+    voiceSelectEl.value = selectedVoice;
+    activeVoiceBackend = backend;
     voicesLoaded = false;
     saveSettings();
   }
@@ -1711,7 +1766,7 @@
       voiceSelectEl.append(option);
     }
 
-    selectVoiceFromList(OPENROUTER_VOICES, DEFAULTS.voice);
+    selectVoiceFromList(OPENROUTER_VOICES, DEFAULTS.openRouterVoice, 'openrouter');
   }
 
   function loadMimoVoices() {
@@ -1726,13 +1781,17 @@
       voiceSelectEl.append(option);
     }
 
-    selectVoiceFromList(MIMO_VOICES, 'Chloe');
+    selectVoiceFromList(MIMO_VOICES, DEFAULTS.mimoVoice, 'mimo');
   }
 
   function loadProviderVoices() {
+    const loadToken = ++voiceListLoadToken;
     if (!settings.useByok) {
       voicesLoaded = false;
-      loadVoices();
+      settings.voice = voiceForBackend(settings, CLOUD_RUN_BACKEND);
+      showRememberedVoice(CLOUD_RUN_BACKEND);
+      saveSettings();
+      loadVoices(loadToken);
       return;
     }
 
@@ -1810,6 +1869,7 @@
   function setByokProvider(provider) {
     settings.byokProvider = provider === 'mimo' ? 'mimo' : 'openrouter';
     settings.useOpenRouter = useOpenRouterByok();
+    settings.voice = voiceForBackend(settings, voiceBackendFromSettings(settings));
     updateByokProviderControls();
     saveSettings();
     if (settings.useByok) {
