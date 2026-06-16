@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JanitorAI Kokoro TTS
 // @namespace    https://www.kokoro.pp.ua/
-// @version      1.6.2
+// @version      1.6.6
 // @description  Read JanitorAI messages, selected text, or typed text with a private Kokoro Cloud Run API.
 // @author       Kaushik Paul
 // @match        https://janitorai.com/*
@@ -32,7 +32,6 @@
     useOpenRouter: false,
     openRouterApiKey: '',
     mimoApiKey: '',
-    styleInstruction: '',
   };
 
   const OPENROUTER_API_KEY_OVERRIDE = '';
@@ -72,7 +71,7 @@
 
   const STORAGE_KEY = 'janitor-kokoro-tts-settings-v2';
   const ROOT_ID = 'kokoro-tts-root';
-  const USER_SCRIPT_VERSION = '1.6.2';
+  const USER_SCRIPT_VERSION = '1.6.6';
   const MAX_TEXT_CHARS = 5900;
   const REQUEST_CHUNK_CHARS = 600;
   const MAX_PARALLEL_REQUESTS = 4;
@@ -87,15 +86,17 @@
   let speedInputEl;
   let apiUrlInputEl;
   let apiKeyInputEl;
+  let apiUrlFieldEl;
+  let apiKeyFieldEl;
   let byokToggleEl;
+  let byokRowEl;
+  let providerToggleEl;
   let openRouterProviderButtonEl;
   let mimoProviderButtonEl;
   let openRouterApiKeyInputEl;
   let mimoApiKeyInputEl;
   let openRouterApiKeyFieldEl;
   let mimoApiKeyFieldEl;
-  let styleInstructionEl;
-  let styleInstructionFieldEl;
   let replayButtonEl;
   let backButtonEl;
   let pauseButtonEl;
@@ -165,7 +166,7 @@
   }
 
   function effectiveStyleInstruction() {
-    return String(settings.styleInstruction || '').trim();
+    return DEFAULT_STYLE_INSTRUCTION;
   }
 
   function effectivePlaybackRate() {
@@ -1632,7 +1633,6 @@
     settings.useOpenRouter = useOpenRouterByok();
     settings.openRouterApiKey = openRouterApiKeyInputEl?.value.trim() || '';
     settings.mimoApiKey = mimoApiKeyInputEl?.value.trim() || '';
-    settings.styleInstruction = styleInstructionEl?.value.trim() || '';
     settings.voice = voiceSelectEl.value || DEFAULTS.voice;
     settings.speed = Number(speedInputEl.value) || DEFAULTS.speed;
     settings.manualText = manualTextEl.value;
@@ -1771,6 +1771,13 @@
 
   function updateByokProviderControls() {
     const provider = activeByokProvider();
+    const byokEnabled = Boolean(settings.useByok);
+    if (byokRowEl) {
+      byokRowEl.dataset.byokEnabled = String(byokEnabled);
+    }
+    if (providerToggleEl) {
+      providerToggleEl.hidden = !byokEnabled;
+    }
     if (openRouterProviderButtonEl) {
       openRouterProviderButtonEl.dataset.active = String(provider === 'openrouter');
       openRouterProviderButtonEl.disabled = false;
@@ -1780,22 +1787,22 @@
       mimoProviderButtonEl.disabled = false;
     }
     if (openRouterApiKeyFieldEl) {
-      openRouterApiKeyFieldEl.hidden = provider !== 'openrouter';
+      openRouterApiKeyFieldEl.hidden = !byokEnabled || provider !== 'openrouter';
     }
     if (mimoApiKeyFieldEl) {
-      mimoApiKeyFieldEl.hidden = provider !== 'mimo';
+      mimoApiKeyFieldEl.hidden = !byokEnabled || provider !== 'mimo';
     }
-    if (styleInstructionFieldEl) {
-      styleInstructionFieldEl.hidden = provider !== 'mimo';
+    if (apiUrlFieldEl) {
+      apiUrlFieldEl.hidden = byokEnabled;
+    }
+    if (apiKeyFieldEl) {
+      apiKeyFieldEl.hidden = byokEnabled;
     }
     if (openRouterApiKeyInputEl) {
       openRouterApiKeyInputEl.disabled = Boolean(OPENROUTER_API_KEY_OVERRIDE);
     }
     if (mimoApiKeyInputEl) {
       mimoApiKeyInputEl.disabled = Boolean(MIMO_API_KEY_OVERRIDE);
-    }
-    if (styleInstructionEl) {
-      styleInstructionEl.disabled = provider !== 'mimo';
     }
   }
 
@@ -1949,10 +1956,6 @@
         white-space: pre-wrap;
       }
 
-      #${ROOT_ID} textarea.kokoro-style-instruction {
-        min-height: 96px;
-      }
-
       #${ROOT_ID} .kokoro-field {
         display: grid;
         gap: 4px;
@@ -1984,9 +1987,13 @@
 
       #${ROOT_ID} .kokoro-byok-row {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(152px, 0.9fr);
+        grid-template-columns: minmax(108px, 0.7fr) minmax(200px, 1.3fr);
         align-items: center;
         gap: 8px;
+      }
+
+      #${ROOT_ID} .kokoro-byok-row[data-byok-enabled="false"] {
+        grid-template-columns: minmax(0, 1fr);
       }
 
       #${ROOT_ID} .kokoro-provider-toggle {
@@ -1998,12 +2005,17 @@
         background: rgba(255, 255, 255, 0.05);
       }
 
+      #${ROOT_ID} .kokoro-provider-toggle[hidden] {
+        display: none;
+      }
+
       #${ROOT_ID} .kokoro-provider-toggle button {
         min-height: 28px;
         padding: 5px 7px;
         border: 0;
         background: transparent;
         font-size: 12px;
+        white-space: nowrap;
       }
 
       #${ROOT_ID} .kokoro-provider-toggle button[data-active="true"] {
@@ -2134,7 +2146,7 @@
     byokToggleEl.type = 'checkbox';
     byokToggleEl.checked = Boolean(settings.useByok);
 
-    const providerToggleEl = document.createElement('div');
+    providerToggleEl = document.createElement('div');
     providerToggleEl.className = 'kokoro-provider-toggle';
 
     openRouterProviderButtonEl = createButton('OpenRouter', 'provider-openrouter');
@@ -2158,11 +2170,6 @@
       ? 'Using script key override'
       : 'Mimo API key';
     mimoApiKeyInputEl.disabled = Boolean(MIMO_API_KEY_OVERRIDE);
-
-    styleInstructionEl = document.createElement('textarea');
-    styleInstructionEl.className = 'kokoro-style-instruction';
-    styleInstructionEl.value = settings.styleInstruction || DEFAULT_STYLE_INSTRUCTION;
-    styleInstructionEl.placeholder = DEFAULT_STYLE_INSTRUCTION;
 
     voiceSelectEl = document.createElement('select');
     const defaultVoiceOption = document.createElement('option');
@@ -2192,22 +2199,22 @@
 
     const advancedBody = document.createElement('div');
     advancedBody.className = 'kokoro-advanced-body';
-    const byokRow = document.createElement('div');
-    byokRow.className = 'kokoro-byok-row';
-    byokRow.append(
+    byokRowEl = document.createElement('div');
+    byokRowEl.className = 'kokoro-byok-row';
+    byokRowEl.append(
       createCheckboxField('Use BYOK', byokToggleEl),
       providerToggleEl,
     );
     openRouterApiKeyFieldEl = createField('OpenRouter API key', openRouterApiKeyInputEl);
     mimoApiKeyFieldEl = createField('Mimo API key', mimoApiKeyInputEl);
-    styleInstructionFieldEl = createField('STYLE_INSTRUCTION', styleInstructionEl);
+    apiUrlFieldEl = createField('API URL', apiUrlInputEl);
+    apiKeyFieldEl = createField('API key', apiKeyInputEl);
     advancedBody.append(
-      byokRow,
+      byokRowEl,
       openRouterApiKeyFieldEl,
       mimoApiKeyFieldEl,
-      styleInstructionFieldEl,
-      createField('API URL', apiUrlInputEl),
-      createField('API key', apiKeyInputEl),
+      apiUrlFieldEl,
+      apiKeyFieldEl,
     );
 
     advanced.append(advancedSummary, advancedBody);
