@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         JanitorAI Kokoro TTS
-// @namespace    https://www.kokoro.pp.ua/
+// @namespace    <namespace if any>
 // @version      1.6.8
 // @description  Read JanitorAI messages, selected text, or typed text with a private Kokoro Cloud Run API.
 // @author       Kaushik Paul
