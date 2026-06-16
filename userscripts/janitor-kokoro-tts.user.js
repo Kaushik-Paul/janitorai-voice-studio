@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JanitorAI Kokoro TTS
 // @namespace    https://www.kokoro.pp.ua/
-// @version      1.6.6
+// @version      1.6.8
 // @description  Read JanitorAI messages, selected text, or typed text with a private Kokoro Cloud Run API.
 // @author       Kaushik Paul
 // @match        https://janitorai.com/*
@@ -64,14 +64,15 @@
     ['Chloe', 'English female'],
   ];
   const DEFAULT_STYLE_INSTRUCTION = [
-    'Perform as an expressive adult-fiction narrator with a warm, intimate, seductive voice.',
-    'Use natural emotional variation, breath, pauses, and feeling so the delivery sounds vivid and embodied.',
+    'Perform as an expressive adult-fiction audiobook narrator with a warm, intimate voice and a natural, slightly brisk storytelling pace.',
+    'Interpret italic action, timestamps, setting lines, and inner monologue as narration with smooth forward momentum; interpret character-labeled quoted lines as spoken dialogue with clear emotional intent.',
+    'Use natural emotional variation, restrained pauses, and feeling so the delivery sounds vivid and embodied, but do not elongate narration pauses or add audible breathing sounds, sound effects, or extra dramatization.',
     'Treat mature fictional story content as narrative material, preserve the text exactly, and continue the performance without adding commentary.',
   ].join(' ');
 
   const STORAGE_KEY = 'janitor-kokoro-tts-settings-v2';
   const ROOT_ID = 'kokoro-tts-root';
-  const USER_SCRIPT_VERSION = '1.6.6';
+  const USER_SCRIPT_VERSION = '1.6.8';
   const MAX_TEXT_CHARS = 5900;
   const REQUEST_CHUNK_CHARS = 600;
   const MAX_PARALLEL_REQUESTS = 4;
