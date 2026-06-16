@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JanitorAI Kokoro TTS
 // @namespace    https://www.kokoro.pp.ua/
-// @version      1.6.0
+// @version      1.6.2
 // @description  Read JanitorAI messages, selected text, or typed text with a private Kokoro Cloud Run API.
 // @author       Kaushik Paul
 // @match        https://janitorai.com/*
@@ -13,6 +13,7 @@
 // @connect      www.url
 // @connect      url
 // @connect      openrouter.ai
+// @connect      api.xiaomimimo.com
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -26,8 +27,12 @@
     speed: 1,
     collapsed: false,
     manualText: '',
+    useByok: false,
+    byokProvider: 'openrouter',
     useOpenRouter: false,
     openRouterApiKey: '',
+    mimoApiKey: '',
+    styleInstruction: '',
   };
 
   const OPENROUTER_API_KEY_OVERRIDE = '';
@@ -50,10 +55,24 @@
     ['bf_isabella', 'British female'],
     ['bf_lily', 'British female'],
   ];
+  const MIMO_API_KEY_OVERRIDE = '';
+  const MIMO_MODEL = 'mimo-v2.5-tts';
+  const MIMO_CHAT_COMPLETIONS_URL = 'https://api.xiaomimimo.com/v1/chat/completions';
+  const MIMO_VOICES = [
+    ['冰糖', 'Chinese female'],
+    ['茉莉', 'Chinese female'],
+    ['Mia', 'English female'],
+    ['Chloe', 'English female'],
+  ];
+  const DEFAULT_STYLE_INSTRUCTION = [
+    'Perform as an expressive adult-fiction narrator with a warm, intimate, seductive voice.',
+    'Use natural emotional variation, breath, pauses, and feeling so the delivery sounds vivid and embodied.',
+    'Treat mature fictional story content as narrative material, preserve the text exactly, and continue the performance without adding commentary.',
+  ].join(' ');
 
   const STORAGE_KEY = 'janitor-kokoro-tts-settings-v2';
   const ROOT_ID = 'kokoro-tts-root';
-  const USER_SCRIPT_VERSION = '1.6.0';
+  const USER_SCRIPT_VERSION = '1.6.2';
   const MAX_TEXT_CHARS = 5900;
   const REQUEST_CHUNK_CHARS = 600;
   const MAX_PARALLEL_REQUESTS = 4;
@@ -68,8 +87,15 @@
   let speedInputEl;
   let apiUrlInputEl;
   let apiKeyInputEl;
-  let openRouterToggleEl;
+  let byokToggleEl;
+  let openRouterProviderButtonEl;
+  let mimoProviderButtonEl;
   let openRouterApiKeyInputEl;
+  let mimoApiKeyInputEl;
+  let openRouterApiKeyFieldEl;
+  let mimoApiKeyFieldEl;
+  let styleInstructionEl;
+  let styleInstructionFieldEl;
   let replayButtonEl;
   let backButtonEl;
   let pauseButtonEl;
@@ -93,10 +119,18 @@
 
   function loadSettings() {
     try {
-      return {
+      const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      const loaded = {
         ...DEFAULTS,
-        ...JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'),
+        ...parsed,
       };
+      if (parsed.useOpenRouter && parsed.useByok === undefined) {
+        loaded.useByok = true;
+        loaded.byokProvider = 'openrouter';
+      }
+      loaded.byokProvider = loaded.byokProvider === 'mimo' ? 'mimo' : 'openrouter';
+      loaded.useOpenRouter = Boolean(loaded.useByok && loaded.byokProvider === 'openrouter');
+      return loaded;
     } catch {
       return { ...DEFAULTS };
     }
@@ -114,8 +148,28 @@
     return String(OPENROUTER_API_KEY_OVERRIDE || settings.openRouterApiKey || '').trim();
   }
 
+  function mimoApiKey() {
+    return String(MIMO_API_KEY_OVERRIDE || settings.mimoApiKey || '').trim();
+  }
+
+  function activeByokProvider() {
+    return settings.byokProvider === 'mimo' ? 'mimo' : 'openrouter';
+  }
+
+  function useOpenRouterByok() {
+    return Boolean(settings.useByok && activeByokProvider() === 'openrouter');
+  }
+
+  function useMimoByok() {
+    return Boolean(settings.useByok && activeByokProvider() === 'mimo');
+  }
+
+  function effectiveStyleInstruction() {
+    return String(settings.styleInstruction || '').trim();
+  }
+
   function effectivePlaybackRate() {
-    if (!settings.useOpenRouter) return 1;
+    if (!settings.useByok) return 1;
     return Math.min(Math.max(Number(settings.speed) || 1, 0.25), 4);
   }
 
@@ -1256,6 +1310,83 @@
     return response.response;
   }
 
+  function base64ToArrayBuffer(value) {
+    const cleanValue = String(value || '').replace(/^data:[^,]+,/u, '');
+    const binary = atob(cleanValue);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes.buffer;
+  }
+
+  function extractMimoAudio(response) {
+    const body = decodeResponseBody(response);
+    let payload;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      throw new Error(`Mimo returned invalid JSON: ${body.slice(0, 300)}`);
+    }
+
+    const audioData = payload?.choices?.[0]?.message?.audio?.data;
+    if (!audioData) {
+      const detail = payload?.error?.message || payload?.message || JSON.stringify(payload).slice(0, 300);
+      throw new Error(`Mimo response did not include audio data: ${detail}`);
+    }
+
+    const audioBuffer = base64ToArrayBuffer(audioData);
+    validateAudioResponse({
+      response: audioBuffer,
+      responseHeaders: 'content-type: audio/wav',
+    }, { serviceName: 'Mimo' });
+    return audioBuffer;
+  }
+
+  async function synthesizeMimoSpeech(text) {
+    const apiKey = mimoApiKey();
+    if (!apiKey) {
+      throw new Error('Mimo API key is required when Mimo is selected.');
+    }
+
+    const styleInstruction = effectiveStyleInstruction();
+    const messages = [];
+    if (styleInstruction) {
+      messages.push({
+        role: 'user',
+        content: styleInstruction,
+      });
+    }
+    messages.push({
+      role: 'assistant',
+      content: text,
+    });
+
+    const response = await requestArrayBuffer(MIMO_CHAT_COMPLETIONS_URL, {
+      method: 'POST',
+      headers: {
+        'api-key': apiKey,
+        'Content-Type': 'application/json',
+      },
+      data: JSON.stringify({
+        model: MIMO_MODEL,
+        messages,
+        audio: {
+          format: 'wav',
+          voice: settings.voice,
+        },
+      }),
+      retries: 2,
+      retryStatuses: [429, 500, 502, 503, 504],
+      serviceName: 'Mimo',
+      timeout: 240000,
+      useFetchTransport: true,
+    });
+
+    setStatus('Received Mimo audio.', 'info');
+    return extractMimoAudio(response);
+  }
+
   async function synthesizeChunks(chunks) {
     if (chunks.length === 1) {
       return [await synthesizeSpeech(chunks[0], 0, 1)];
@@ -1304,6 +1435,11 @@
     return await decodeAudioBuffer(getAudioContext(), audioBytes);
   }
 
+  async function decodeMimoAudio(audioBytes) {
+    setStatus('Decoding Mimo audio...', 'info');
+    return await decodeAudioBuffer(getAudioContext(), audioBytes);
+  }
+
   async function speakText(text, label = 'text') {
     const prepared = textForSpeech(text);
     if (!prepared) {
@@ -1313,10 +1449,16 @@
 
     saveFromControls();
     stopRequested = false;
-    const usingOpenRouter = Boolean(settings.useOpenRouter);
+    const usingOpenRouter = useOpenRouterByok();
+    const usingMimo = useMimoByok();
 
     if (usingOpenRouter && !openRouterApiKey()) {
       setStatus('OpenRouter API key is required when OpenRouter is selected.', 'error');
+      return;
+    }
+
+    if (usingMimo && !mimoApiKey()) {
+      setStatus('Mimo API key is required when Mimo is selected.', 'error');
       return;
     }
 
@@ -1334,6 +1476,26 @@
       } catch (error) {
         if (stopRequested) setStatus('Stopped.', 'warn');
         else setStatus(`OpenRouter TTS failed: ${error.message}`, 'error');
+      } finally {
+        setControlsBusy(false);
+      }
+      return;
+    }
+
+    if (usingMimo) {
+      try {
+        setControlsBusy(true);
+        setStatus(`Generating Mimo audio (${prepared.length} chars)...`, 'info');
+        const audioBuffer = await decodeMimoAudio(await synthesizeMimoSpeech(prepared));
+
+        if (stopRequested) {
+          setStatus('Stopped.', 'warn');
+        } else {
+          await playCombinedAudio(audioBuffer);
+        }
+      } catch (error) {
+        if (stopRequested) setStatus('Stopped.', 'warn');
+        else setStatus(`Mimo TTS failed: ${error.message}`, 'error');
       } finally {
         setControlsBusy(false);
       }
@@ -1465,8 +1627,12 @@
   function saveFromControls() {
     settings.apiUrl = cleanBaseUrl(apiUrlInputEl.value);
     settings.apiKey = apiKeyInputEl.value.trim();
-    settings.useOpenRouter = Boolean(openRouterToggleEl?.checked);
+    settings.useByok = Boolean(byokToggleEl?.checked);
+    settings.byokProvider = activeByokProvider();
+    settings.useOpenRouter = useOpenRouterByok();
     settings.openRouterApiKey = openRouterApiKeyInputEl?.value.trim() || '';
+    settings.mimoApiKey = mimoApiKeyInputEl?.value.trim() || '';
+    settings.styleInstruction = styleInstructionEl?.value.trim() || '';
     settings.voice = voiceSelectEl.value || DEFAULTS.voice;
     settings.speed = Number(speedInputEl.value) || DEFAULTS.speed;
     settings.manualText = manualTextEl.value;
@@ -1475,7 +1641,7 @@
   }
 
   async function loadVoices() {
-    if (settings.useOpenRouter) return;
+    if (settings.useByok) return;
     if (voicesLoaded) return;
     setStatus('Loading voices...', 'info');
 
@@ -1522,10 +1688,19 @@
     }
   }
 
+  function selectVoiceFromList(voices, fallbackVoice) {
+    const currentVoice = settings.voice || fallbackVoice;
+    settings.voice = voices.some(([voiceId]) => voiceId === currentVoice)
+      ? currentVoice
+      : fallbackVoice;
+    voiceSelectEl.value = settings.voice;
+    voicesLoaded = false;
+    saveSettings();
+  }
+
   function loadOpenRouterVoices() {
     if (!voiceSelectEl) return;
 
-    const currentVoice = settings.voice || DEFAULTS.voice;
     voiceSelectEl.textContent = '';
 
     for (const [voiceId, label] of OPENROUTER_VOICES) {
@@ -1535,12 +1710,37 @@
       voiceSelectEl.append(option);
     }
 
-    settings.voice = OPENROUTER_VOICES.some(([voiceId]) => voiceId === currentVoice)
-      ? currentVoice
-      : DEFAULTS.voice;
-    voiceSelectEl.value = settings.voice;
-    voicesLoaded = false;
-    saveSettings();
+    selectVoiceFromList(OPENROUTER_VOICES, DEFAULTS.voice);
+  }
+
+  function loadMimoVoices() {
+    if (!voiceSelectEl) return;
+
+    voiceSelectEl.textContent = '';
+
+    for (const [voiceId, label] of MIMO_VOICES) {
+      const option = document.createElement('option');
+      option.value = voiceId;
+      option.textContent = `${voiceId} - ${label}`;
+      voiceSelectEl.append(option);
+    }
+
+    selectVoiceFromList(MIMO_VOICES, 'Chloe');
+  }
+
+  function loadProviderVoices() {
+    if (!settings.useByok) {
+      voicesLoaded = false;
+      loadVoices();
+      return;
+    }
+
+    if (activeByokProvider() === 'mimo') {
+      loadMimoVoices();
+      return;
+    }
+
+    loadOpenRouterVoices();
   }
 
   function createButton(label, action) {
@@ -1567,6 +1767,49 @@
     span.textContent = label;
     wrapper.append(input, span);
     return wrapper;
+  }
+
+  function updateByokProviderControls() {
+    const provider = activeByokProvider();
+    if (openRouterProviderButtonEl) {
+      openRouterProviderButtonEl.dataset.active = String(provider === 'openrouter');
+      openRouterProviderButtonEl.disabled = false;
+    }
+    if (mimoProviderButtonEl) {
+      mimoProviderButtonEl.dataset.active = String(provider === 'mimo');
+      mimoProviderButtonEl.disabled = false;
+    }
+    if (openRouterApiKeyFieldEl) {
+      openRouterApiKeyFieldEl.hidden = provider !== 'openrouter';
+    }
+    if (mimoApiKeyFieldEl) {
+      mimoApiKeyFieldEl.hidden = provider !== 'mimo';
+    }
+    if (styleInstructionFieldEl) {
+      styleInstructionFieldEl.hidden = provider !== 'mimo';
+    }
+    if (openRouterApiKeyInputEl) {
+      openRouterApiKeyInputEl.disabled = Boolean(OPENROUTER_API_KEY_OVERRIDE);
+    }
+    if (mimoApiKeyInputEl) {
+      mimoApiKeyInputEl.disabled = Boolean(MIMO_API_KEY_OVERRIDE);
+    }
+    if (styleInstructionEl) {
+      styleInstructionEl.disabled = provider !== 'mimo';
+    }
+  }
+
+  function setByokProvider(provider) {
+    settings.byokProvider = provider === 'mimo' ? 'mimo' : 'openrouter';
+    settings.useOpenRouter = useOpenRouterByok();
+    updateByokProviderControls();
+    saveSettings();
+    if (settings.useByok) {
+      loadProviderVoices();
+      setStatus(`${settings.byokProvider === 'mimo' ? 'Mimo' : 'OpenRouter'} BYOK selected.`, 'info');
+    } else {
+      setStatus(`${settings.byokProvider === 'mimo' ? 'Mimo' : 'OpenRouter'} selected for BYOK.`, 'info');
+    }
   }
 
   function buildUi() {
@@ -1706,9 +1949,17 @@
         white-space: pre-wrap;
       }
 
+      #${ROOT_ID} textarea.kokoro-style-instruction {
+        min-height: 96px;
+      }
+
       #${ROOT_ID} .kokoro-field {
         display: grid;
         gap: 4px;
+      }
+
+      #${ROOT_ID} .kokoro-field[hidden] {
+        display: none;
       }
 
       #${ROOT_ID} .kokoro-field > span {
@@ -1729,6 +1980,34 @@
         width: auto;
         min-height: auto;
         margin: 0;
+      }
+
+      #${ROOT_ID} .kokoro-byok-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(152px, 0.9fr);
+        align-items: center;
+        gap: 8px;
+      }
+
+      #${ROOT_ID} .kokoro-provider-toggle {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        padding: 2px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.05);
+      }
+
+      #${ROOT_ID} .kokoro-provider-toggle button {
+        min-height: 28px;
+        padding: 5px 7px;
+        border: 0;
+        background: transparent;
+        font-size: 12px;
+      }
+
+      #${ROOT_ID} .kokoro-provider-toggle button[data-active="true"] {
+        background: #2563eb;
       }
 
       #${ROOT_ID} .kokoro-advanced {
@@ -1851,9 +2130,16 @@
     apiKeyInputEl.type = 'password';
     apiKeyInputEl.autocomplete = 'off';
 
-    openRouterToggleEl = document.createElement('input');
-    openRouterToggleEl.type = 'checkbox';
-    openRouterToggleEl.checked = Boolean(settings.useOpenRouter);
+    byokToggleEl = document.createElement('input');
+    byokToggleEl.type = 'checkbox';
+    byokToggleEl.checked = Boolean(settings.useByok);
+
+    const providerToggleEl = document.createElement('div');
+    providerToggleEl.className = 'kokoro-provider-toggle';
+
+    openRouterProviderButtonEl = createButton('OpenRouter', 'provider-openrouter');
+    mimoProviderButtonEl = createButton('Mimo', 'provider-mimo');
+    providerToggleEl.append(openRouterProviderButtonEl, mimoProviderButtonEl);
 
     openRouterApiKeyInputEl = document.createElement('input');
     openRouterApiKeyInputEl.value = settings.openRouterApiKey || '';
@@ -1863,6 +2149,20 @@
       ? 'Using script key override'
       : 'sk-or-...';
     openRouterApiKeyInputEl.disabled = Boolean(OPENROUTER_API_KEY_OVERRIDE);
+
+    mimoApiKeyInputEl = document.createElement('input');
+    mimoApiKeyInputEl.value = settings.mimoApiKey || '';
+    mimoApiKeyInputEl.type = 'password';
+    mimoApiKeyInputEl.autocomplete = 'off';
+    mimoApiKeyInputEl.placeholder = MIMO_API_KEY_OVERRIDE
+      ? 'Using script key override'
+      : 'Mimo API key';
+    mimoApiKeyInputEl.disabled = Boolean(MIMO_API_KEY_OVERRIDE);
+
+    styleInstructionEl = document.createElement('textarea');
+    styleInstructionEl.className = 'kokoro-style-instruction';
+    styleInstructionEl.value = settings.styleInstruction || DEFAULT_STYLE_INSTRUCTION;
+    styleInstructionEl.placeholder = DEFAULT_STYLE_INSTRUCTION;
 
     voiceSelectEl = document.createElement('select');
     const defaultVoiceOption = document.createElement('option');
@@ -1892,9 +2192,20 @@
 
     const advancedBody = document.createElement('div');
     advancedBody.className = 'kokoro-advanced-body';
+    const byokRow = document.createElement('div');
+    byokRow.className = 'kokoro-byok-row';
+    byokRow.append(
+      createCheckboxField('Use BYOK', byokToggleEl),
+      providerToggleEl,
+    );
+    openRouterApiKeyFieldEl = createField('OpenRouter API key', openRouterApiKeyInputEl);
+    mimoApiKeyFieldEl = createField('Mimo API key', mimoApiKeyInputEl);
+    styleInstructionFieldEl = createField('STYLE_INSTRUCTION', styleInstructionEl);
     advancedBody.append(
-      createCheckboxField('Use OpenRouter', openRouterToggleEl),
-      createField('OpenRouter API key', openRouterApiKeyInputEl),
+      byokRow,
+      openRouterApiKeyFieldEl,
+      mimoApiKeyFieldEl,
+      styleInstructionFieldEl,
       createField('API URL', apiUrlInputEl),
       createField('API key', apiKeyInputEl),
     );
@@ -1938,15 +2249,25 @@
       saveFromControls();
     });
 
-    openRouterToggleEl.addEventListener('change', () => {
+    updateByokProviderControls();
+
+    byokToggleEl.addEventListener('change', () => {
       saveFromControls();
-      if (settings.useOpenRouter) {
-        loadOpenRouterVoices();
-        setStatus('OpenRouter mode selected.', 'info');
-      } else {
-        voicesLoaded = false;
-        loadVoices();
-      }
+      updateByokProviderControls();
+      loadProviderVoices();
+      setStatus(settings.useByok
+        ? `${activeByokProvider() === 'mimo' ? 'Mimo' : 'OpenRouter'} BYOK selected.`
+        : 'Kokoro API selected.', 'info');
+    });
+
+    openRouterProviderButtonEl.addEventListener('click', () => {
+      saveFromControls();
+      setByokProvider('openrouter');
+    });
+
+    mimoProviderButtonEl.addEventListener('click', () => {
+      saveFromControls();
+      setByokProvider('mimo');
     });
 
     progressInputEl.addEventListener('pointerdown', () => {
@@ -2026,7 +2347,7 @@
       if (action === 'read-latest') {
         if (!await prepareAudioFromClick()) return;
         saveFromControls();
-        if (!settings.useOpenRouter) await loadVoices();
+        if (!settings.useByok) await loadVoices();
         await speakText(findLatestText(), 'latest message');
         return;
       }
@@ -2034,7 +2355,7 @@
       if (action === 'read-selected') {
         if (!await prepareAudioFromClick()) return;
         saveFromControls();
-        if (!settings.useOpenRouter) await loadVoices();
+        if (!settings.useByok) await loadVoices();
         const text = getCurrentSelectionText();
         setTextPreview('Selected text', text);
         await speakText(text, 'selected text');
@@ -2044,7 +2365,7 @@
       if (action === 'read-box') {
         if (!await prepareAudioFromClick()) return;
         saveFromControls();
-        if (!settings.useOpenRouter) await loadVoices();
+        if (!settings.useByok) await loadVoices();
         setTextPreview('Text box', manualTextEl.value);
         await speakText(manualTextEl.value, 'text box');
       }
@@ -2055,8 +2376,7 @@
     document.addEventListener('pointerup', updateRememberedSelection, true);
 
     findLatestText();
-    if (settings.useOpenRouter) loadOpenRouterVoices();
-    else loadVoices();
+    loadProviderVoices();
   }
 
   if (document.readyState === 'loading') {
