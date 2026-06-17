@@ -64,7 +64,7 @@ the same emotional/contextual cues shown in the chat.
 
 ### JanitorAI Userscript
 
-- Floating TTS panel on `janitorai.com`.
+- Floating TTS panel on JanitorAI chat pages.
 - Read latest bot message.
 - Read currently selected text.
 - Read manually pasted text.
@@ -135,7 +135,7 @@ extraction.
 Use this path if you want hosted TTS without deploying Cloud Run.
 
 1. Install the userscript in Tampermonkey.
-2. Open JanitorAI and expand the `Advanced` section in the `Kokoro TTS` panel.
+2. Open a JanitorAI chat and expand the `Advanced` section in the `JanitorAI Voice Studio` panel.
 3. Enable `Use BYOK`.
 4. Choose `OpenRouter` or `Mimo` in the provider switch.
 5. Enter the selected provider's API key.
@@ -220,8 +220,8 @@ Tampermonkey lets you run custom JavaScript on specific websites. In this
 project, it runs the JanitorAI frontend script only on:
 
 ```text
-https://janitorai.com/*
-https://www.janitorai.com/*
+https://janitorai.com/chats/*
+https://www.janitorai.com/chats/*
 ```
 
 Install Tampermonkey for your browser:
@@ -245,12 +245,12 @@ the script dashboard.
 8. Make sure the script is enabled in the Tampermonkey dashboard.
 9. Open or refresh JanitorAI.
 
-If the script is installed correctly, a floating `Kokoro TTS` panel appears in
-the bottom-right corner of JanitorAI.
+If the script is installed correctly, a floating `JanitorAI Voice Studio` panel
+appears in the bottom-right corner of JanitorAI chat pages.
 
 #### 4. Configure The Userscript
 
-Open the `Advanced` section in the Kokoro TTS panel and confirm:
+Open the `Advanced` section in the JanitorAI Voice Studio panel and confirm:
 
 - For BYOK mode, enable `Use BYOK`, choose `OpenRouter` or `Mimo`, and set the
   selected provider API key.

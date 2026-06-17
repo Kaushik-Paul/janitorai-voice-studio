@@ -1,11 +1,11 @@
 // ==UserScript==
-// @name         JanitorAI Kokoro TTS
+// @name         JanitorAI Voice Studio
 // @namespace    <namespace if any>
-// @version      1.6.12
+// @version      1.6.13
 // @description  Read JanitorAI messages, selected text, or typed text with a private Kokoro Cloud Run API.
 // @author       Kaushik Paul
-// @match        https://janitorai.com/*
-// @match        https://www.janitorai.com/*
+// @match        https://janitorai.com/chats/*
+// @match        https://www.janitorai.com/chats/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=janitorai.com
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
@@ -75,7 +75,7 @@
 
   const STORAGE_KEY = 'janitor-kokoro-tts-settings-v2';
   const ROOT_ID = 'kokoro-tts-root';
-  const USER_SCRIPT_VERSION = '1.6.12';
+  const USER_SCRIPT_VERSION = '1.6.13';
   const MAX_TEXT_CHARS = 5900;
   const REQUEST_CHUNK_CHARS = 600;
   const MAX_PARALLEL_REQUESTS = 4;
@@ -334,7 +334,7 @@
 
   function uiTextNoisePattern() {
     return new RegExp([
-      'Kokoro TTS',
+      'JanitorAI Voice Studio',
       'Read latest',
       'Read selected',
       'Read box',
@@ -708,7 +708,7 @@
           candidates.push({ element, text });
         }
       } catch (error) {
-        console.warn('Kokoro TTS selector ignored:', error);
+        console.warn('JanitorAI Voice Studio selector ignored:', error);
       }
     }
 
@@ -1340,7 +1340,7 @@
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
         'HTTP-Referer': location.origin,
-        'X-Title': 'JanitorAI Kokoro TTS',
+        'X-Title': 'JanitorAI Voice Studio',
       },
       data: JSON.stringify({
         model: OPENROUTER_MODEL,
@@ -2208,7 +2208,7 @@
 
     const title = document.createElement('div');
     title.className = 'kokoro-title';
-    title.textContent = 'Kokoro TTS';
+    title.textContent = 'JanitorAI Voice Studio';
 
     const collapseButton = createButton(settings.collapsed ? 'Open' : 'Hide', 'collapse');
     collapseButton.style.width = '72px';
