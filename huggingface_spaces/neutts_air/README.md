@@ -4,13 +4,16 @@ emoji: 🗣️
 colorFrom: indigo
 colorTo: blue
 sdk: gradio
-sdk_version: 5.49.1
+sdk_version: 6.17.3
 python_version: 3.12.12
 app_file: app.py
 suggested_hardware: cpu-basic
 models:
   - neuphonic/neutts-air-q4-gguf
   - neuphonic/neucodec-onnx-decoder-int8
+preload_from_hub:
+  - neuphonic/neutts-air-q4-gguf neutts-air-Q4_0.gguf
+  - neuphonic/neucodec-onnx-decoder-int8 model.onnx
 ---
 
 # NeuTTS Air on Hugging Face Spaces
@@ -42,7 +45,9 @@ curl -X POST "https://YOUR-SPACE.hf.space/v1/audio/speech" \
   --output speech.wav
 ```
 
-The Gradio UI is available at `/ui`.
+The password-protected Gradio UI is available at the Space root. Model files
+are preloaded into the image's Hugging Face cache during the build and the
+engine is initialized once per app process, not once per API request.
 
 ## Tone and style
 

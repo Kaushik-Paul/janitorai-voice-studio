@@ -49,6 +49,13 @@ def require_api_key(
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
+def require_ui_password(supplied_key: str) -> None:
+    if not API_PASSWORD:
+        raise gr.Error("API_PASSWORD is not configured in this Space's secrets")
+    if not supplied_key or not secrets.compare_digest(supplied_key, API_PASSWORD):
+        raise gr.Error("Invalid API password")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # Load once at startup so requests do not each reload llama.cpp and the codec.
@@ -71,15 +78,15 @@ api.add_middleware(
 )
 
 
-@api.get("/")
-def root() -> dict[str, str]:
+@api.get("/api")
+def api_information() -> dict[str, str]:
     return {
         "service": "NeuTTS Air CPU API",
         "status": "running",
         "health": "/health",
         "voices": "/v1/voices",
         "speech": "/v1/audio/speech",
-        "ui": "/ui",
+        "ui": "/",
     }
 
 
@@ -138,7 +145,8 @@ def create_speech(payload: SpeechRequest) -> StreamingResponse:
     )
 
 
-def synthesize_for_ui(text: str, voice: str, speed: float):
+def synthesize_for_ui(text: str, voice: str, speed: float, password: str):
+    require_ui_password(password)
     return get_engine("cpu").synthesize(text, voice, speed)
 
 
@@ -161,17 +169,22 @@ with gr.Blocks(title="NeuTTS Air - CPU") as demo:
         label="Voice / tone reference",
     )
     speed_input = gr.Slider(0.5, 2.0, value=1.0, step=0.05, label="Speed")
+    password_input = gr.Textbox(
+        label="API password",
+        type="password",
+        placeholder="Enter the same password used by X-API-Key",
+    )
     generate_button = gr.Button("Generate", variant="primary")
     audio_output = gr.Audio(label="Generated speech")
     generate_button.click(
         synthesize_for_ui,
-        inputs=[text_input, voice_input, speed_input],
+        inputs=[text_input, voice_input, speed_input, password_input],
         outputs=audio_output,
         api_name="synthesize_cpu",
     )
 
 
-app = gr.mount_gradio_app(api, demo, path="/ui")
+app = gr.mount_gradio_app(api, demo, path="/", ssr_mode=False)
 
 
 if __name__ == "__main__":
