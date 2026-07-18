@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         JanitorAI Voice Studio
-// @namespace    <namespace if any>
+// @namespace    https://www.kokoro.pp.ua/
 // @version      1.6.13
 // @description  Read JanitorAI messages, selected text, or typed text with a private Kokoro Cloud Run API.
 // @author       Kaushik Paul
@@ -10,8 +10,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @grant        unsafeWindow
-// @connect      www.url
-// @connect      url
+// @connect      www.kokoro.pp.ua
+// @connect      kokoro.pp.ua
 // @connect      openrouter.ai
 // @connect      api.xiaomimimo.com
 // @run-at       document-idle
@@ -21,8 +21,8 @@
   'use strict';
 
   const DEFAULTS = {
-    apiUrl: '<Url>',
-    apiKey: '<password>',
+    apiUrl: 'https://www.kokoro.pp.ua',
+    apiKey: 'kokoro.pp.ua',
     voice: 'af_heart',
     speed: 1,
     collapsed: false,

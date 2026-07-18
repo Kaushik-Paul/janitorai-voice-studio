@@ -1,0 +1,4 @@
+espeak-ng
+libopenblas-dev
+libopenblas0
+libsndfile1
