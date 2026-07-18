@@ -1,192 +1,289 @@
 # JanitorAI Voice Studio
 
 Add text-to-speech controls to [JanitorAI](https://janitorai.com/) with a
-Tampermonkey userscript. Audio can be generated through Mimo v2.5 TTS,
-OpenRouter's hosted `hexgrad/kokoro-82m` model, or a private Kokoro backend
-running on Google Cloud Run.
+Tampermonkey userscript. The default Kokoro deployment uses two Hugging Face
+Spaces:
 
-The project has two pieces:
+- a free CPU Space for normal use, protected by `API_PASSWORD`, and
+- a ZeroGPU Space for faster generation, authenticated with the caller's
+  Hugging Face token so usage and queue priority are assigned correctly.
 
-- `userscripts/janitor-kokoro-tts.user.js` injects a TTS panel into JanitorAI.
-  It can read the latest bot message, selected text, or text pasted into its
-  box, then send it to the selected provider.
-- `main/app.py` optionally exposes a password-protected FastAPI service that runs
-  [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) and returns generated
-  speech as WAV audio. You can skip this entire backend setup when using
-  Mimo or OpenRouter BYOK mode.
-- `huggingface_spaces/neutts_air` contains deployable free-CPU and ZeroGPU
-  profiles for [NeuTTS Air](https://huggingface.co/neuphonic/neutts-air-q4-gguf).
-  The CPU profile preserves the private backend's `/v1/voices` and
-  `/v1/audio/speech` routes.
-
-## What This Is For
-
-JanitorAI does not provide this voice workflow by default. This project adds a
-small browser-side control panel that turns chat text into speech through Mimo,
-OpenRouter, or your own private Kokoro backend.
-
-Use it when you want to:
-
-- listen to JanitorAI bot replies instead of reading every message,
-- generate voice from selected parts of a chat,
-- paste custom text and hear it in a supported provider voice,
-- keep control of the TTS API key and backend deployment when self-hosting,
-- skip Cloud Run entirely when you prefer BYOK providers such as Mimo or
-  OpenRouter-hosted Kokoro.
-
-Tampermonkey is the browser extension that runs the frontend script on
-JanitorAI pages. In BYOK mode, the userscript calls the selected provider
-directly. In Cloud Run mode, Cloud Run hosts the backend that performs Kokoro
-text-to-speech generation.
+The userscript can also call Mimo or OpenRouter in BYOK mode. Google Cloud Run
+remains available as an optional replacement for the CPU Space.
 
 ## How It Works
 
-1. JanitorAI renders a chat message in the browser.
-2. The Tampermonkey userscript finds the latest bot message, selected text, or
-   text from its manual input box.
-3. If BYOK mode is enabled, the userscript sends the prepared text directly to
-   the selected provider:
-   Mimo v2.5 TTS or OpenRouter's `hexgrad/kokoro-82m` speech endpoint.
-4. If Cloud Run mode is enabled, long text is split client-side into small
-   natural chunks of about 600 characters, and the userscript sends up to four
-   TTS requests at a time to the Cloud Run API.
-5. The selected provider generates audio.
-6. The userscript decodes the returned audio, combines chunks when Cloud Run
-   mode is used, then plays the final audio through a Web Audio controller with
-   replay, pause/play, seek, and 10-second skip controls.
+1. The userscript reads the latest JanitorAI bot message, selected text, or text
+   pasted into its box.
+2. The backend is selected in the panel's `Advanced` section:
+   - `Use BYOK` enabled: call Mimo or OpenRouter directly.
+   - `Use BYOK` disabled and `Use Hugging Face ZeroGPU` enabled: call the
+     Kokoro ZeroGPU Space through its queued Gradio API.
+   - Both disabled: call the Kokoro CPU Space through its REST API.
+3. The full prepared text is sent in one browser request. The userscript no
+   longer splits long Kokoro text or combines multiple WAV files.
+4. The selected backend performs any required sentence splitting. The CPU
+   Space balances segments across its two CPU cores and returns one WAV file.
+5. The userscript decodes and plays the result with replay, pause/play, seek,
+   and 10-second skip controls.
 
-Cloud Run chunking keeps individual backend requests small enough to reduce
-memory spikes while still using up to four Cloud Run instances when long text is
-available. BYOK provider mode skips this chunking and skips the Cloud Run
-backend entirely.
-
-The userscript keeps JanitorAI markdown-like text such as `**bold**`,
-`*italics*`, timestamps, narration, and dialogue so the TTS backend receives
-the same emotional/contextual cues shown in the chat.
+Kokoro is multilingual text-to-speech, not translation. Submit text that is
+already in the language associated with the selected voice.
 
 ## Features
 
-### JanitorAI Userscript
-
-- Floating TTS panel on JanitorAI chat pages.
-- Read latest bot message.
-- Read currently selected text.
-- Read manually pasted text.
-- Manual text box fallback when selection is unreliable.
-- Female voice list only.
-- Speed control.
-- Audio controller with replay, pause/play, seek, back 10 seconds, and forward
-  10 seconds.
-- Advanced `Use BYOK` toggle for provider mode or private Cloud Run mode.
-- Provider switch between OpenRouter and Mimo when BYOK is enabled.
-- Masked OpenRouter and Mimo API keys stored locally in the browser.
-- Optional script-level OpenRouter API key override.
-- Optional script-level Mimo API key override.
-- Cloud Run API URL and API key stored under the collapsed Advanced section.
-- OpenRouter mode sends full prepared text directly to OpenRouter and does not
-  call the Cloud Run backend.
-- Mimo mode sends prepared text directly to Mimo v2.5 TTS and can include the
-  `STYLE_INSTRUCTION` field for expressive delivery control.
-- Cloud Run mode uses client-side chunking around 600 characters, with at most
-  four active TTS requests.
-- BYOK provider mode applies speed through Web Audio playback rate after the
-  audio is received.
-- Web Audio playback, avoiding browser media URL safety blocks.
-- Filters JanitorAI UI actions such as `Copy`, `Edit`, and `CopyEdit` from
+- Read the latest bot message, selected text, or manually pasted text.
+- Female Kokoro voice list and speech-speed control.
+- Free CPU and ZeroGPU Kokoro backends.
+- Mimo and OpenRouter BYOK providers.
+- Web Audio playback with replay, pause, seek, and skip controls.
+- Local browser storage for settings and masked credential fields.
+- Filtering of JanitorAI actions such as `Copy`, `Edit`, and `CopyEdit` from
   spoken text.
-
-### Cloud Run Backend
-
-- Runs Kokoro-82M on CPU.
-- Exposes a FastAPI HTTP API.
-- Requires `X-API-Key` authentication for voice listing and speech generation.
-- Returns generated speech as `audio/wav` at 24 kHz.
-- Supports American and British English voices.
-- Supports configurable speech speed from `0.5` to `2.0`.
-- Bundles the Kokoro model into the container image for Cloud Run scale-to-zero.
-- Uses one Uvicorn worker and a process-local inference lock for the shared CPU
-  model.
-
-This backend is only needed for Cloud Run mode. Mimo and OpenRouter modes use
-hosted provider endpoints directly from the browser userscript.
+- Kokoro model preload at Space build time and one-time process initialization;
+  the model is not downloaded for every API request.
 
 ## Project Structure
 
 ```text
 kokoro-cloud-run/
 ├── huggingface_spaces/
+│   ├── kokoro_82m/
+│   │   ├── app.py                    # CPU REST API and Gradio UI
+│   │   ├── app_zerogpu.py            # queued ZeroGPU Gradio API and UI
+│   │   ├── core.py                   # shared synthesis engines
+│   │   ├── README.cpu.md             # CPU Space metadata
+│   │   ├── README.zerogpu.md         # ZeroGPU Space metadata
+│   │   └── upload_spaces.py          # updates both Kokoro Spaces
 │   └── neutts_air/
 │       ├── app.py
 │       ├── app_zerogpu.py
 │       ├── core.py
-│       ├── README.md
-│       └── requirements.txt
+│       └── upload_spaces.py
 ├── main/
-│   ├── __init__.py
-│   └── app.py
+│   └── app.py                        # optional Cloud Run backend
 ├── scripts/
 │   ├── deploy_cloud_run.py
 │   └── download_model.py
 ├── userscripts/
 │   └── janitor-kokoro-tts.user.js
-├── demo.html
 ├── Dockerfile
-├── LICENSE
-├── README.md
 └── requirements.txt
 ```
 
-The NeuTTS Air folder is an independently uploadable Hugging Face Space
-bundle. Its own README explains the two-Space deployment, API calls, and the
-important difference between Mimo-style text instructions and NeuTTS Air's
-reference-recording-based tone control.
+The NeuTTS Air folder is an independent pair of Hugging Face Space bundles. Its
+README explains its reference-recording-based tone control.
 
-`demo.html` is a local JanitorAI chat snapshot used while tuning message
-extraction.
+## Deploy Kokoro to Hugging Face Spaces
 
-## Quick Start
+### 1. Install or upgrade the Hugging Face CLI
 
-### Option A: Use BYOK Providers
+Use a virtual environment if possible:
 
-Use this path if you want hosted TTS without deploying Cloud Run.
+```bash
+python3 -m venv .venv-hf
+source .venv-hf/bin/activate
+python -m pip install --upgrade pip huggingface_hub
+hf --version
+hf auth login
+```
 
-1. Install the userscript in Tampermonkey.
-2. Open a JanitorAI chat and expand the `Advanced` section in the `JanitorAI Voice Studio` panel.
-3. Enable `Use BYOK`.
-4. Choose `OpenRouter` or `Mimo` in the provider switch.
-5. Enter the selected provider's API key.
-6. For Mimo, optionally edit `STYLE_INSTRUCTION` for delivery style.
-7. Click `Read latest`, `Read selected`, or `Read box`.
+Paste a Hugging Face access token with permission to write to your Spaces.
 
-When BYOK is enabled:
+### 2. Create the CPU Space
 
-- The Cloud Run backend is not called.
-- The Cloud Run `API URL` and `API key` fields are unused.
-- OpenRouter calls `https://openrouter.ai/api/v1/audio/speech` directly with
-  model `hexgrad/kokoro-82m`.
-- Mimo calls `https://api.xiaomimimo.com/v1/chat/completions` directly with
-  model `mimo-v2.5-tts`.
-- Mimo voices in the userscript include `冰糖`, `茉莉`, `Mia`, and `Chloe`.
-- The full prepared text is sent in one request instead of being split into
-  Cloud Run chunks.
-- The selected provider API key is stored locally in browser storage, like the
-  other userscript settings.
+On <https://huggingface.co/new-space>:
 
-The userscript metadata must include:
+1. Create a public Space, for example `your-name/kokoro-82m-cpu-api`.
+2. Select `Gradio` as the SDK.
+3. Keep the free `CPU Basic` hardware. The profile uses two vCPUs.
+4. In `Settings` -> `Variables and secrets`, add a secret named
+   `API_PASSWORD` with a long random value.
+
+The CPU web UI and REST API use the same password. The UI asks for it when
+`Generate` is clicked; REST clients send it in `X-API-Key`.
+
+### 3. Create the ZeroGPU Space
+
+Create another public Gradio Space, for example
+`your-name/kokoro-82m-zerogpu`, and select `ZeroGPU` hardware.
+
+Do not add `API_PASSWORD` to this Space. ZeroGPU API calls use the caller's
+Hugging Face token. This is required for ZeroGPU quota and queue accounting.
+Create a read token at <https://huggingface.co/settings/tokens> for use in the
+userscript; a write token is not needed for inference.
+
+### 4. Upload both profiles
+
+The upload helper maps the CPU and ZeroGPU variants to the filenames expected
+by each Space:
+
+```bash
+python3 huggingface_spaces/kokoro_82m/upload_spaces.py \
+  --cpu-repo your-name/kokoro-82m-cpu-api \
+  --zerogpu-repo your-name/kokoro-82m-zerogpu
+```
+
+Useful options:
+
+```bash
+# Show the exact staged files without uploading
+python3 huggingface_spaces/kokoro_82m/upload_spaces.py --dry-run
+
+# Update only one profile
+python3 huggingface_spaces/kokoro_82m/upload_spaces.py --target cpu
+python3 huggingface_spaces/kokoro_82m/upload_spaces.py --target zerogpu
+```
+
+The default repository IDs in the helper are this project's deployed Spaces.
+Pass `--cpu-repo` and `--zerogpu-repo` for your own account. By default the
+helper preserves unrelated remote files. `--prune` deletes remote files that
+are not in the staged bundle, so use it only when that is intentional.
+
+Both Space READMEs use `preload_from_hub: hexgrad/Kokoro-82M`. Hugging Face
+therefore puts model files in the built Space image. The applications then
+initialize the model once per process and reuse it for requests. A separate
+Storage Bucket is not required for model weights.
+
+### 5. Optional custom domains
+
+This userscript currently uses:
 
 ```text
+CPU:     https://apicpu.kokoro.pp.ua
+ZeroGPU: https://apizero.kokoro.pp.ua
+```
+
+After attaching different custom domains to your Spaces, edit these constants
+in `userscripts/janitor-kokoro-tts.user.js`:
+
+```javascript
+const CPU_SPACE_URL = 'https://your-cpu-domain.example';
+const GPU_SPACE_URL = 'https://your-gpu-domain.example';
+```
+
+Also replace the corresponding Tampermonkey metadata entries:
+
+```text
+@connect your-cpu-domain.example
+@connect your-gpu-domain.example
+```
+
+Do not put `https://` or a path in an `@connect` entry.
+
+## Install and Configure the Userscript
+
+1. Install Tampermonkey in a Chromium browser or Firefox.
+2. Create a new userscript and replace the template with the complete contents
+   of `userscripts/janitor-kokoro-tts.user.js`.
+3. Save it, ensure it is enabled, and refresh a JanitorAI chat.
+4. Expand `Advanced` in the `JanitorAI Voice Studio` panel.
+
+Choose one mode:
+
+- CPU Space: disable `Use BYOK` and `Use Hugging Face ZeroGPU`, then enter the
+  CPU Space's `API_PASSWORD` in `CPU Space API key`.
+- ZeroGPU Space: disable `Use BYOK`, enable `Use Hugging Face ZeroGPU`, then
+  enter a Hugging Face read token in `Hugging Face token`.
+- OpenRouter or Mimo: enable `Use BYOK`, select the provider, and enter its API
+  key.
+
+Only the credential used by the selected mode is shown. Credentials and the
+other panel settings are stored in the userscript's browser `localStorage`.
+Treat the browser profile and exported userscript data as sensitive.
+
+The userscript metadata already permits these hosts:
+
+```text
+@connect apicpu.kokoro.pp.ua
+@connect apizero.kokoro.pp.ua
 @connect openrouter.ai
 @connect api.xiaomimimo.com
 ```
 
-### Option B: Use Your Own Cloud Run Backend
+## Hugging Face APIs
 
-Use this path if you want a private Kokoro backend under your own Google Cloud
-project.
+### CPU REST API
 
-#### 1. Deploy The Backend
+Public endpoints:
 
-Create a `.env` file or export these values:
+- `GET /api` - service metadata
+- `GET /health` - lightweight health check
+- `GET /docs` - FastAPI Swagger UI
+
+Authenticated endpoints:
+
+- `GET /v1/voices`
+- `POST /v1/audio/speech`
+
+Example:
+
+```bash
+export CPU_SPACE_URL="https://apicpu.kokoro.pp.ua"
+export API_PASSWORD="your-cpu-space-password"
+
+curl -X POST "$CPU_SPACE_URL/v1/audio/speech" \
+  -H "X-API-Key: $API_PASSWORD" \
+  -H "Content-Type: application/json" \
+  -o speech.wav \
+  -d '{
+    "text": "Hello from the Kokoro CPU Space.",
+    "voice": "af_heart",
+    "speed": 1.0
+  }'
+```
+
+Input is limited to 6,000 characters. The backend splits longer input internally
+at sentence boundaries, schedules segments across two single-threaded workers,
+restores their original order, and returns one 24 kHz PCM WAV file.
+
+### ZeroGPU Gradio API
+
+The named endpoint is `/synthesize_zerogpu`. With Python and `gradio_client`:
+
+```python
+from gradio_client import Client
+
+client = Client(
+    "your-name/kokoro-82m-zerogpu",
+    token="hf_your_read_token",
+)
+result = client.predict(
+    text="Hello from Kokoro ZeroGPU.",
+    voice="af_heart",
+    speed=1.0,
+    api_name="/synthesize_zerogpu",
+)
+print(result)
+```
+
+The userscript implements the same Gradio 6.20 queue flow over the custom
+domain: submit named inputs to
+`POST /gradio_api/call/v2/synthesize_zerogpu`, wait at
+`GET /gradio_api/call/synthesize_zerogpu/<event_id>`, and download the returned
+WAV URL with the same Hugging Face bearer token.
+
+## BYOK Providers
+
+When `Use BYOK` is enabled:
+
+- OpenRouter calls `https://openrouter.ai/api/v1/audio/speech` with model
+  `hexgrad/kokoro-82m`.
+- Mimo calls `https://api.xiaomimimo.com/v1/chat/completions` with model
+  `mimo-v2.5-tts`.
+- Kokoro CPU and ZeroGPU Spaces are not called.
+- Speed is applied through Web Audio playback rate after provider audio is
+  received.
+
+You can set `OPENROUTER_API_KEY_OVERRIDE` or `MIMO_API_KEY_OVERRIDE` in the
+userscript instead of filling the corresponding Advanced field.
+
+## Optional Google Cloud Run Backend
+
+Cloud Run can replace the CPU Hugging Face Space because it exposes the same
+`GET /v1/voices` and `POST /v1/audio/speech` contract with `X-API-Key`.
+
+### Deploy
 
 ```bash
 export PROJECT_ID="your-gcp-project-id"
@@ -195,11 +292,7 @@ export REPOSITORY="kokoro"
 export IMAGE_NAME="kokoro-cloud-run"
 export SERVICE_NAME="kokoro-tts"
 export API_PASSWORD="replace-with-a-long-random-secret"
-```
 
-Deploy with the helper script:
-
-```bash
 python3 scripts/deploy_cloud_run.py \
   --project-id "$PROJECT_ID" \
   --region "$REGION" \
@@ -210,15 +303,7 @@ python3 scripts/deploy_cloud_run.py \
   --build-mode cloud-build
 ```
 
-The deploy script:
-
-- enables required Google Cloud APIs,
-- creates the Artifact Registry repository if needed,
-- builds and pushes the Docker image,
-- deploys Cloud Run,
-- keeps the newest Artifact Registry image by default.
-
-Current Cloud Run defaults are tuned for the JanitorAI userscript:
+The defaults are:
 
 ```text
 CPU: 2
@@ -230,231 +315,51 @@ TORCH_NUM_THREADS: 2
 MAX_TEXT_CHARS: 6000
 ```
 
-#### 2. Install Tampermonkey
+### Point the userscript at Cloud Run
 
-Tampermonkey lets you run custom JavaScript on specific websites. In this
-project, it runs the JanitorAI frontend script only on:
+There is intentionally no editable API URL field in the panel. To use Cloud
+Run, make these source changes before installing the userscript:
 
-```text
-https://janitorai.com/chats/*
-https://www.janitorai.com/chats/*
-```
-
-Install Tampermonkey for your browser:
-
-- Chrome, Brave, Edge, or other Chromium browsers: install Tampermonkey from
-  the Chrome Web Store.
-- Firefox: install Tampermonkey from Firefox Add-ons.
-
-After installation, pin the Tampermonkey extension if you want quick access to
-the script dashboard.
-
-#### 3. Add The Userscript
-
-1. Click the Tampermonkey extension icon.
-2. Open `Dashboard`.
-3. Click the `+` button or `Create a new script`.
-4. Delete the default template Tampermonkey creates.
-5. Copy the entire contents of `userscripts/janitor-kokoro-tts.user.js`.
-6. Paste it into the Tampermonkey editor.
-7. Save the script with `File` -> `Save`, or press `Ctrl+S`.
-8. Make sure the script is enabled in the Tampermonkey dashboard.
-9. Open or refresh JanitorAI.
-
-If the script is installed correctly, a floating `JanitorAI Voice Studio` panel
-appears in the bottom-right corner of JanitorAI chat pages.
-
-#### 4. Configure The Userscript
-
-Open the `Advanced` section in the JanitorAI Voice Studio panel and confirm:
-
-- For BYOK mode, enable `Use BYOK`, choose `OpenRouter` or `Mimo`, and set the
-  selected provider API key.
-- For Cloud Run mode, disable `Use BYOK`, set `API URL` to your Cloud Run
-  domain, and set `API key` to the backend `API_PASSWORD`.
-
-Update the default `apiUrl` and `apiKey` in the userscript before copying it
-into Tampermonkey, or change them from the panel's Advanced section. For
-BYOK providers, you can also set `OPENROUTER_API_KEY_OVERRIDE` or
-`MIMO_API_KEY_OVERRIDE` in the userscript if you prefer a script-level key
-instead of filling the Advanced field.
-
-The userscript metadata must also allow your backend domain through
-Tampermonkey's `@connect` rules. Add matching `@connect` entries before saving
-the script in Tampermonkey.
+1. Replace `CPU_SPACE_URL` with the HTTPS Cloud Run service URL.
+2. Replace `@connect apicpu.kokoro.pp.ua` with an `@connect` entry containing
+   only the Cloud Run hostname.
+3. Keep `Use BYOK` and `Use Hugging Face ZeroGPU` disabled.
+4. Enter the Cloud Run `API_PASSWORD` in `CPU Space API key`. The label still
+   says CPU Space, but the REST contract is identical.
 
 For example:
 
-```text
-@connect your-cloud-run-domain.run.app
-@connect openrouter.ai
-@connect api.xiaomimimo.com
+```javascript
+const CPU_SPACE_URL = 'https://kokoro-tts-xxxxxxxxxx-uc.a.run.app';
 ```
-
-#### 5. Use It In JanitorAI
-
-- `Read latest` reads the latest rendered bot message.
-- `Read selected` reads highlighted text.
-- `Read box` reads text pasted into the userscript text box.
-- `Stop` aborts active requests and stops playback.
-- Use the controller to replay, pause/play, seek, or skip after audio is
-  generated.
-
-Typical usage:
-
-1. Open a JanitorAI chat.
-2. Wait for the bot response to finish rendering.
-3. Click `Read latest`.
-4. Adjust `Voice` or `Speed` if needed.
-5. Use `Replay`, `Pause`, the seek bar, or the skip buttons after generation.
-
-If `Read latest` picks the wrong message, paste the text into the text box and
-click `Read box`.
-
-## Cloud Run Backend API
-
-This API is used only when `Use BYOK` is disabled in the userscript. Mimo and
-OpenRouter modes do not call these endpoints.
-
-Public endpoints:
-
-- `GET /` - service metadata
-- `GET /health` - lightweight health check
-- `GET /docs` - FastAPI Swagger UI
-
-Authenticated endpoints:
-
-- `GET /v1/voices` - list supported voices
-- `POST /v1/audio/speech` - generate WAV speech
-
-All authenticated endpoints require:
-
-```http
-X-API-Key: <API_PASSWORD>
-```
-
-Example speech request:
-
-```bash
-curl -X POST "$SERVICE_URL/v1/audio/speech" \
-  -H "X-API-Key: $API_PASSWORD" \
-  -H "Content-Type: application/json" \
-  -o speech.wav \
-  -d '{
-    "text": "Hello from Kokoro running on Cloud Run.",
-    "voice": "af_heart",
-    "speed": 1.0
-  }'
-```
-
-Example voice list request:
-
-```bash
-curl "$SERVICE_URL/v1/voices" \
-  -H "X-API-Key: $API_PASSWORD"
-```
-
-## Backend Configuration
-
-Runtime environment variables:
-
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `API_PASSWORD` | Yes | None | Shared API key expected in the `X-API-Key` header. |
-| `PORT` | No | `8080` | HTTP port used by Cloud Run and Uvicorn. |
-| `MAX_TEXT_CHARS` | No | `6000` | Maximum accepted input text length. |
-| `MAX_SYNTHESIS_CHARS` | No | `500` | Internal synthesis segment size inside one request. |
-| `TORCH_NUM_THREADS` | No | `2` | Number of PyTorch CPU threads. |
-| `KOKORO_MODEL_DIR` | No | `/opt/kokoro` | Directory containing Kokoro files inside the image. |
-
-Build-time model download uses Hugging Face through
-`scripts/download_model.py`. The final runtime image sets:
 
 ```text
-HF_HUB_OFFLINE=1
-TRANSFORMERS_OFFLINE=1
+@connect kokoro-tts-xxxxxxxxxx-uc.a.run.app
 ```
 
-## Local Backend Development
+The updated userscript sends the full prepared text as one request. Do not
+restore the old browser-side 600-character splitting; `main/app.py` already
+performs bounded synthesis segmentation inside the backend.
 
-The image build downloads Kokoro model files from Hugging Face, installs the CPU
-PyTorch wheel, installs the spaCy English model, and verifies the required model
-files before the image is completed.
-
-```bash
-docker build -t kokoro-cloud-run:local .
-```
-
-Run the container locally:
-
-```bash
-docker run --rm \
-  -p 8080:8080 \
-  -e API_PASSWORD="change-me" \
-  kokoro-cloud-run:local
-```
-
-Test the local service:
-
-```bash
-curl http://localhost:8080/health
-```
-
-Generate local speech:
-
-```bash
-curl -X POST http://localhost:8080/v1/audio/speech \
-  -H "X-API-Key: change-me" \
-  -H "Content-Type: application/json" \
-  -o speech.wav \
-  -d '{"text":"Kokoro is running locally.","voice":"af_heart","speed":1.0}'
-```
-
-Point the userscript Advanced API URL at `http://localhost:8080` only if your
-browser and Tampermonkey setup allow that mixed local request from JanitorAI.
-For normal use, use the HTTPS Cloud Run URL.
-
-## Manual Cloud Run Deploy
-
-The helper script is the easiest path, but the equivalent manual deploy flow is
-shown below.
-
-Authenticate Docker for Artifact Registry:
-
-```bash
-gcloud auth configure-docker "$REGION-docker.pkg.dev"
-```
-
-Enable required APIs:
+### Manual Cloud Run build and deploy
 
 ```bash
 gcloud services enable \
   artifactregistry.googleapis.com \
   run.googleapis.com \
   cloudbuild.googleapis.com
-```
 
-Create an Artifact Registry Docker repository:
-
-```bash
 gcloud artifacts repositories create "$REPOSITORY" \
   --repository-format=docker \
   --location="$REGION" \
   --description="Docker images for Kokoro Cloud Run"
-```
 
-Build the image locally for Artifact Registry:
-
-```bash
 export IMAGE_URI="$REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:latest"
 
-docker build -t "$IMAGE_URI" .
-docker push "$IMAGE_URI"
-```
+gcloud builds submit \
+  --tag "$IMAGE_URI" \
+  --machine-type=e2-highcpu-8
 
-Deploy the image to Cloud Run:
-
-```bash
 gcloud run deploy "$SERVICE_NAME" \
   --image="$IMAGE_URI" \
   --region="$REGION" \
@@ -469,87 +374,43 @@ gcloud run deploy "$SERVICE_NAME" \
   --set-env-vars="API_PASSWORD=$API_PASSWORD,TORCH_NUM_THREADS=2,MAX_TEXT_CHARS=6000"
 ```
 
-`--allow-unauthenticated` lets browser clients reach the FastAPI service. The
-API still requires `X-API-Key` for speech generation and voice listing. If you
-want Google IAM in front of the service too, remove `--allow-unauthenticated`
-and call Cloud Run with an identity token.
+`--allow-unauthenticated` allows the browser to reach FastAPI. The protected
+routes still require `X-API-Key`. Remove that flag only if your client also
+supplies Google IAM identity tokens.
 
-Get the deployed service URL:
-
-```bash
-export SERVICE_URL="$(gcloud run services describe "$SERVICE_NAME" \
-  --region="$REGION" \
-  --format='value(status.url)')"
-
-echo "$SERVICE_URL"
-```
-
-Test the deployment:
+## Local Cloud Run Backend Development
 
 ```bash
-curl "$SERVICE_URL/health"
+docker build -t kokoro-cloud-run:local .
 
-curl -X POST "$SERVICE_URL/v1/audio/speech" \
-  -H "X-API-Key: $API_PASSWORD" \
-  -H "Content-Type: application/json" \
-  -o speech.wav \
-  -d '{"text":"Kokoro is running on Cloud Run.","voice":"af_heart","speed":1.0}'
+docker run --rm \
+  -p 8080:8080 \
+  -e API_PASSWORD="change-me" \
+  kokoro-cloud-run:local
+
+curl http://localhost:8080/health
 ```
 
-## Cloud Build
-
-If you prefer not to build the large image locally, submit the build directly to
-Cloud Build and push it to Artifact Registry:
-
-```bash
-export IMAGE_URI="$REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:latest"
-
-gcloud builds submit \
-  --tag "$IMAGE_URI" \
-  --machine-type=e2-highcpu-8
-```
-
-Then deploy the same `IMAGE_URI` with the Cloud Run command above.
-
-## Operational Notes
-
-- BYOK provider mode does not use Cloud Run, `/v1/voices`, or
-  `/v1/audio/speech` from this repository.
-- Keep Cloud Run `concurrency=1` so each TTS request gets the full instance and
-  parallel userscript requests can scale to separate instances.
-- Keep `max-instances=4` for economical parallelism. The userscript sends at
-  most four requests at once, so raising this limit will not help unless the
-  userscript is changed too.
-- Individual userscript requests are kept around 600 characters to reduce
-  memory pressure.
-- The backend also splits each request internally with `MAX_SYNTHESIS_CHARS`.
-- Cold starts include loading the bundled Kokoro model from the container
-  filesystem.
-- `API_PASSWORD` should be a long random value. For production, prefer storing
-  it in Secret Manager and mounting it as an environment variable.
-- The generated audio is returned directly; no audio files are written to disk.
+The image downloads the Kokoro files while building and runs with
+`HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`.
 
 ## Troubleshooting
 
-- If OpenRouter mode fails, confirm `Use BYOK` is enabled, `OpenRouter` is
-  selected, `OpenRouter API key` is filled or `OPENROUTER_API_KEY_OVERRIDE` is
-  set, and the userscript metadata includes `@connect openrouter.ai`.
-- If Mimo mode fails, confirm `Use BYOK` is enabled, `Mimo` is selected,
-  `Mimo API key` is filled or `MIMO_API_KEY_OVERRIDE` is set, and the userscript
-  metadata includes `@connect api.xiaomimimo.com`.
-- If JanitorAI playback fails with a media URL safety error, make sure the
-  current userscript is installed. It uses Web Audio playback instead of an
-  HTML media element.
-- If long messages cause Cloud Run `503` responses, check Cloud Run logs for
-  out-of-memory events and confirm the userscript version uses 600-character
-  chunks.
-- If `Read latest` reads the wrong text, use the text box as a fallback and
-  capture a fresh JanitorAI HTML snapshot for selector tuning.
-- If Cloud Run voices fail to load, confirm the API URL, API key, and
-  Tampermonkey `@connect` domains match your backend domain. BYOK provider mode
-  uses the userscript's built-in provider voice lists.
+- CPU `401`: confirm the value entered in `CPU Space API key` exactly matches
+  the CPU Space's `API_PASSWORD` secret.
+- CPU `503`: confirm `API_PASSWORD` exists as a Space secret, then restart the
+  Space after changing it.
+- ZeroGPU authentication or quota error: use a valid Hugging Face read token,
+  ensure the ZeroGPU Space is public and running, and confirm the custom domain
+  points to that Space.
+- Voice list fails on CPU: the list is protected by the same CPU API key. Enter
+  the key before trying to generate speech.
+- Custom-domain request blocked: confirm both `@connect` entries contain the
+  exact hostnames and then reinstall or re-authorize the userscript.
+- OpenRouter or Mimo failure: confirm `Use BYOK`, the selected provider, its API
+  key, and the matching `@connect` entry.
+- Wrong JanitorAI text: use the manual text box as a fallback.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE)
-file for details.
+This project is licensed under the MIT License. See [LICENSE](LICENSE).

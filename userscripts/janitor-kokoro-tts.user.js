@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         JanitorAI Voice Studio
 // @namespace    https://www.kokoro.pp.ua/
-// @version      1.6.13
-// @description  Read JanitorAI messages, selected text, or typed text with a private Kokoro Cloud Run API.
+// @version      1.7.1
+// @description  Read JanitorAI messages, selected text, or typed text with Kokoro Hugging Face Spaces or BYOK providers.
 // @author       Kaushik Paul
 // @match        https://janitorai.com/chats/*
 // @match        https://www.janitorai.com/chats/*
@@ -10,8 +10,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @grant        unsafeWindow
-// @connect      www.kokoro.pp.ua
-// @connect      kokoro.pp.ua
+// @connect      apicpu.kokoro.pp.ua
+// @connect      apizero.kokoro.pp.ua
 // @connect      openrouter.ai
 // @connect      api.xiaomimimo.com
 // @run-at       document-idle
@@ -21,8 +21,9 @@
   'use strict';
 
   const DEFAULTS = {
-    apiUrl: 'https://www.kokoro.pp.ua',
-    apiKey: 'kokoro.pp.ua',
+    cpuApiKey: '',
+    hfToken: '',
+    useGpu: false,
     voice: 'af_heart',
     speed: 1,
     collapsed: false,
@@ -30,9 +31,9 @@
     useByok: false,
     byokProvider: 'openrouter',
     useOpenRouter: false,
-    openRouterApiKey: '',
-    mimoApiKey: '',
-    cloudRunVoice: 'af_heart',
+    openRouterApiKey: 'sk-',
+    mimoApiKey: 'sk-',
+    kokoroVoice: 'af_heart',
     openRouterVoice: 'af_heart',
     mimoVoice: 'Chloe',
   };
@@ -75,12 +76,13 @@
 
   const STORAGE_KEY = 'janitor-kokoro-tts-settings-v2';
   const ROOT_ID = 'kokoro-tts-root';
-  const USER_SCRIPT_VERSION = '1.6.13';
+  const USER_SCRIPT_VERSION = '1.7.1';
   const MAX_TEXT_CHARS = 5900;
-  const REQUEST_CHUNK_CHARS = 600;
-  const MAX_PARALLEL_REQUESTS = 4;
   const ACTION_TEXT_PATTERN = /^(copy|edit|copy\s*edit|copyedit|delete|regenerate|continue|retry|swipe|report|more|less)$/i;
-  const CLOUD_RUN_BACKEND = 'cloudRun';
+  const KOKORO_BACKEND = 'kokoro';
+  const CPU_SPACE_URL = 'https://apicpu.kokoro.pp.ua';
+  const GPU_SPACE_URL = 'https://apizero.kokoro.pp.ua';
+  const GRADIO_API_PREFIX = '/gradio_api';
   const PANEL_EDGE_MARGIN = 8;
 
   let settings = loadSettings();
@@ -90,10 +92,12 @@
   let manualTextEl;
   let voiceSelectEl;
   let speedInputEl;
-  let apiUrlInputEl;
   let apiKeyInputEl;
-  let apiUrlFieldEl;
   let apiKeyFieldEl;
+  let gpuToggleEl;
+  let gpuToggleFieldEl;
+  let hfTokenInputEl;
+  let hfTokenFieldEl;
   let byokToggleEl;
   let byokRowEl;
   let providerToggleEl;
@@ -140,10 +144,17 @@
       }
       loaded.byokProvider = loaded.byokProvider === 'mimo' ? 'mimo' : 'openrouter';
       loaded.useOpenRouter = Boolean(loaded.useByok && loaded.byokProvider === 'openrouter');
-      loaded.cloudRunVoice = loaded.cloudRunVoice || (!loaded.useByok ? loaded.voice : DEFAULTS.cloudRunVoice);
+      const legacyApiKey = parsed.apiKey === 'kokoro.pp.ua' ? '' : parsed.apiKey;
+      loaded.cpuApiKey = parsed.cpuApiKey ?? legacyApiKey ?? DEFAULTS.cpuApiKey;
+      loaded.hfToken = parsed.hfToken || DEFAULTS.hfToken;
+      loaded.useGpu = Boolean(parsed.useGpu);
+      loaded.kokoroVoice = parsed.kokoroVoice || parsed.cloudRunVoice || (!loaded.useByok ? loaded.voice : DEFAULTS.kokoroVoice);
       loaded.openRouterVoice = loaded.openRouterVoice || (loaded.useByok && loaded.byokProvider === 'openrouter' ? loaded.voice : DEFAULTS.openRouterVoice);
       loaded.mimoVoice = loaded.mimoVoice || (loaded.useByok && loaded.byokProvider === 'mimo' ? loaded.voice : DEFAULTS.mimoVoice);
       loaded.voice = voiceForBackend(loaded, voiceBackendFromSettings(loaded));
+      delete loaded.apiUrl;
+      delete loaded.apiKey;
+      delete loaded.cloudRunVoice;
       return loaded;
     } catch {
       return { ...DEFAULTS };
@@ -151,14 +162,14 @@
   }
 
   function voiceBackendFromSettings(value = settings) {
-    if (!value.useByok) return CLOUD_RUN_BACKEND;
+    if (!value.useByok) return KOKORO_BACKEND;
     return value.byokProvider === 'mimo' ? 'mimo' : 'openrouter';
   }
 
   function voiceForBackend(value, backend) {
     if (backend === 'mimo') return value.mimoVoice || DEFAULTS.mimoVoice;
     if (backend === 'openrouter') return value.openRouterVoice || DEFAULTS.openRouterVoice;
-    return value.cloudRunVoice || value.voice || DEFAULTS.cloudRunVoice;
+    return value.kokoroVoice || value.voice || DEFAULTS.kokoroVoice;
   }
 
   function rememberVoiceForBackend(backend, voice) {
@@ -168,7 +179,7 @@
     } else if (backend === 'openrouter') {
       settings.openRouterVoice = nextVoice;
     } else {
-      settings.cloudRunVoice = nextVoice;
+      settings.kokoroVoice = nextVoice;
     }
     settings.voice = nextVoice;
   }
@@ -188,10 +199,6 @@
 
   function saveSettings() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-  }
-
-  function cleanBaseUrl(value) {
-    return String(value || DEFAULTS.apiUrl).trim().replace(/\/+$/, '');
   }
 
   function openRouterApiKey() {
@@ -754,78 +761,6 @@
     return text;
   }
 
-  function splitLongText(value, maxLength) {
-    const chunks = [];
-    const sentences = value.match(/[^.!?\n]+(?:[.!?]+["'”’)]*|$)/gu) || [value];
-    let current = '';
-
-    function pushCurrent() {
-      const text = current.trim();
-      if (text) chunks.push(text);
-      current = '';
-    }
-
-    for (const sentenceValue of sentences) {
-      const sentence = sentenceValue.trim();
-      if (!sentence) continue;
-
-      if (sentence.length > maxLength) {
-        pushCurrent();
-        for (const word of sentence.split(/\s+/u)) {
-          const next = current ? `${current} ${word}` : word;
-          if (next.length <= maxLength) {
-            current = next;
-          } else {
-            pushCurrent();
-            current = word;
-          }
-        }
-        pushCurrent();
-      } else if (!current) {
-        current = sentence;
-      } else if (`${current} ${sentence}`.length <= maxLength) {
-        current += ` ${sentence}`;
-      } else {
-        pushCurrent();
-        current = sentence;
-      }
-    }
-
-    pushCurrent();
-    return chunks;
-  }
-
-  function splitTextForRequests(text) {
-    const prepared = textForSpeech(text);
-    if (!prepared) return [];
-
-    const chunks = [];
-    let current = '';
-
-    function pushCurrent() {
-      const text = current.trim();
-      if (text) chunks.push(text);
-      current = '';
-    }
-
-    for (const paragraph of prepared.split(/\n{2,}/u).map((part) => part.trim()).filter(Boolean)) {
-      if (paragraph.length > REQUEST_CHUNK_CHARS) {
-        pushCurrent();
-        chunks.push(...splitLongText(paragraph, REQUEST_CHUNK_CHARS));
-      } else if (!current) {
-        current = paragraph;
-      } else if (`${current}\n\n${paragraph}`.length <= REQUEST_CHUNK_CHARS) {
-        current += `\n\n${paragraph}`;
-      } else {
-        pushCurrent();
-        current = paragraph;
-      }
-    }
-
-    pushCurrent();
-    return chunks;
-  }
-
   function decodeResponseBody(response) {
     const data = response.response;
     if (typeof data === 'string') return data;
@@ -1091,146 +1026,6 @@
     });
   }
 
-  function readAscii(bytes, offset, length) {
-    return String.fromCharCode(...bytes.subarray(offset, offset + length));
-  }
-
-  function writeAscii(bytes, offset, value) {
-    for (let index = 0; index < value.length; index += 1) {
-      bytes[offset + index] = value.charCodeAt(index);
-    }
-  }
-
-  function parseWav(buffer) {
-    const bytes = new Uint8Array(buffer);
-    const view = new DataView(buffer);
-
-    if (bytes.length < 44 || readAscii(bytes, 0, 4) !== 'RIFF' || readAscii(bytes, 8, 4) !== 'WAVE') {
-      throw new Error('Audio chunk is not a RIFF/WAVE file.');
-    }
-
-    let fmtBytes = null;
-    let formatKey = '';
-    let dataOffset = -1;
-    let dataSize = 0;
-    let offset = 12;
-
-    while (offset + 8 <= bytes.length) {
-      const chunkId = readAscii(bytes, offset, 4);
-      const chunkSize = view.getUint32(offset + 4, true);
-      const chunkDataOffset = offset + 8;
-
-      if (chunkDataOffset + chunkSize > bytes.length) {
-        throw new Error(`Invalid WAV ${chunkId.trim() || 'chunk'} size.`);
-      }
-
-      if (chunkId === 'fmt ') {
-        if (chunkSize < 16) throw new Error('WAV fmt chunk is too small.');
-        fmtBytes = bytes.slice(chunkDataOffset, chunkDataOffset + chunkSize);
-        formatKey = [
-          view.getUint16(chunkDataOffset, true),
-          view.getUint16(chunkDataOffset + 2, true),
-          view.getUint32(chunkDataOffset + 4, true),
-          view.getUint16(chunkDataOffset + 12, true),
-          view.getUint16(chunkDataOffset + 14, true),
-        ].join(':');
-      } else if (chunkId === 'data') {
-        dataOffset = chunkDataOffset;
-        dataSize = chunkSize;
-      }
-
-      offset = chunkDataOffset + chunkSize + (chunkSize % 2);
-    }
-
-    if (!fmtBytes || dataOffset < 0) {
-      throw new Error('WAV chunk is missing fmt or data.');
-    }
-
-    return { bytes, fmtBytes, formatKey, dataOffset, dataSize };
-  }
-
-  function combineWavBuffers(buffers) {
-    const validBuffers = buffers.filter(Boolean);
-
-    if (!validBuffers.length) {
-      throw new Error('No audio buffers were generated.');
-    }
-
-    if (validBuffers.length === 1) {
-      return validBuffers[0];
-    }
-
-    const parsedBuffers = validBuffers.map(parseWav);
-    const first = parsedBuffers[0];
-
-    if (!parsedBuffers.every((item) => item.formatKey === first.formatKey)) {
-      throw new Error('Kokoro returned WAV chunks with different audio formats.');
-    }
-
-    const fmtSize = first.fmtBytes.byteLength;
-    const fmtPad = fmtSize % 2;
-    const dataSize = parsedBuffers.reduce((sum, item) => sum + item.dataSize, 0);
-    const dataPad = dataSize % 2;
-    const fileSize = 12 + 8 + fmtSize + fmtPad + 8 + dataSize + dataPad;
-    const output = new ArrayBuffer(fileSize);
-    const bytes = new Uint8Array(output);
-    const view = new DataView(output);
-    let offset = 0;
-
-    writeAscii(bytes, offset, 'RIFF');
-    offset += 4;
-    view.setUint32(offset, fileSize - 8, true);
-    offset += 4;
-    writeAscii(bytes, offset, 'WAVE');
-    offset += 4;
-    writeAscii(bytes, offset, 'fmt ');
-    offset += 4;
-    view.setUint32(offset, fmtSize, true);
-    offset += 4;
-    bytes.set(first.fmtBytes, offset);
-    offset += fmtSize + fmtPad;
-    writeAscii(bytes, offset, 'data');
-    offset += 4;
-    view.setUint32(offset, dataSize, true);
-    offset += 4;
-
-    for (const item of parsedBuffers) {
-      bytes.set(item.bytes.subarray(item.dataOffset, item.dataOffset + item.dataSize), offset);
-      offset += item.dataSize;
-    }
-
-    return output;
-  }
-
-  function combineAudioBuffers(buffers) {
-    const context = getAudioContext();
-    const validBuffers = buffers.filter(Boolean);
-
-    if (!validBuffers.length) {
-      throw new Error('No audio buffers were generated.');
-    }
-
-    if (validBuffers.length === 1) {
-      return validBuffers[0];
-    }
-
-    const sampleRate = validBuffers[0].sampleRate;
-    const channelCount = Math.max(...validBuffers.map((buffer) => buffer.numberOfChannels));
-    const totalLength = validBuffers.reduce((sum, buffer) => sum + buffer.length, 0);
-    const combined = context.createBuffer(channelCount, totalLength, sampleRate);
-    let writeOffset = 0;
-
-    for (const buffer of validBuffers) {
-      for (let channel = 0; channel < channelCount; channel += 1) {
-        const input = buffer.getChannelData(Math.min(channel, buffer.numberOfChannels - 1));
-        combined.getChannelData(channel).set(input, writeOffset);
-      }
-      writeOffset += buffer.length;
-    }
-
-    return combined;
-  }
-
   function startCurrentAudio(offset = playbackOffset) {
     if (!activeAudioBuffer) {
       if (latestPreviewEl) latestPreviewEl.textContent = 'Playback: no generated audio to play yet.';
@@ -1278,7 +1073,7 @@
     startPlaybackTimer();
   }
 
-  async function playCombinedAudio(audioBuffer) {
+  async function playAudio(audioBuffer) {
     cleanupAudio(true);
     await unlockAudioPlayback();
     activeAudioBuffer = audioBuffer;
@@ -1295,23 +1090,21 @@
     });
   }
 
-  function speechUrl(index, total, batchId) {
-    const url = new URL(`${cleanBaseUrl(settings.apiUrl)}/v1/audio/speech`);
-    if (total > 1) {
-      url.searchParams.set('batch', batchId);
-      url.searchParams.set('chunk', String(index + 1));
-      url.searchParams.set('total', String(total));
+  function parseJsonResponse(response, serviceName) {
+    const body = decodeResponseBody(response);
+    try {
+      return JSON.parse(body);
+    } catch {
+      throw new Error(`${serviceName} returned invalid JSON: ${body.slice(0, 300)}`);
     }
-    return url.toString();
   }
 
-  async function synthesizeSpeech(text, index = 0, total = 1, batchId = '') {
-    const url = speechUrl(index, total, batchId);
-    const response = await requestArrayBuffer(url, {
+  async function synthesizeCpuSpeech(text) {
+    const response = await requestArrayBuffer(`${CPU_SPACE_URL}/v1/audio/speech`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-API-Key': settings.apiKey,
+        'X-API-Key': settings.cpuApiKey,
       },
       data: JSON.stringify({
         text,
@@ -1320,12 +1113,113 @@
       }),
       retries: 3,
       retryStatuses: [429, 500, 502, 503, 504],
+      serviceName: 'Kokoro CPU Space',
       useFetchTransport: true,
     });
 
-    validateAudioResponse(response);
-    setStatus(total > 1 ? `Received ${index + 1}/${total}.` : 'Received audio.', 'info');
+    validateAudioResponse(response, { serviceName: 'Kokoro CPU Space' });
+    setStatus('Received CPU Space audio.', 'info');
     return response.response;
+  }
+
+  function gradioHeaders() {
+    return {
+      Authorization: `Bearer ${settings.hfToken}`,
+      'Content-Type': 'application/json',
+    };
+  }
+
+  function gradioResultFromEvents(response) {
+    const body = decodeResponseBody(response);
+    const blocks = body.split(/\r?\n\r?\n/u).filter(Boolean);
+
+    for (const block of blocks) {
+      const eventName = block.match(/^event:\s*([^\r\n]+)/mu)?.[1]?.trim();
+      const dataText = block
+        .split(/\r?\n/u)
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
+        .join('\n');
+
+      if (eventName === 'error') {
+        let detail = dataText;
+        try {
+          detail = JSON.parse(dataText);
+        } catch {
+          // Keep the server text when the error event is not JSON.
+        }
+        throw new Error(`ZeroGPU queue failed: ${String(detail).slice(0, 400)}`);
+      }
+
+      if (eventName === 'complete') {
+        try {
+          return JSON.parse(dataText);
+        } catch {
+          throw new Error(`ZeroGPU returned invalid completion data: ${dataText.slice(0, 300)}`);
+        }
+      }
+    }
+
+    throw new Error(`ZeroGPU queue ended without a completion event: ${body.slice(0, 300)}`);
+  }
+
+  function gradioFileUrl(fileData) {
+    const rawUrl = String(fileData?.url || '').trim();
+    if (!rawUrl) {
+      throw new Error('ZeroGPU completion did not include an audio URL.');
+    }
+
+    const parsedUrl = new URL(rawUrl, `${GPU_SPACE_URL}/`);
+    return new URL(`${parsedUrl.pathname}${parsedUrl.search}`, `${GPU_SPACE_URL}/`).toString();
+  }
+
+  async function synthesizeGpuSpeech(text) {
+    const callEndpoint = `${GPU_SPACE_URL}${GRADIO_API_PREFIX}/call`;
+    const submitResponse = await requestArrayBuffer(`${callEndpoint}/v2/synthesize_zerogpu`, {
+      method: 'POST',
+      headers: gradioHeaders(),
+      data: JSON.stringify({
+        text,
+        voice: settings.voice,
+        speed: Number(settings.speed) || 1,
+      }),
+      retries: 2,
+      retryStatuses: [429, 500, 502, 503, 504],
+      serviceName: 'Kokoro ZeroGPU Space',
+      timeout: 240000,
+      useFetchTransport: true,
+    });
+    const eventId = parseJsonResponse(submitResponse, 'ZeroGPU submission')?.event_id;
+    if (!eventId) {
+      throw new Error('ZeroGPU submission did not return an event ID.');
+    }
+
+    setStatus('Waiting in the Hugging Face ZeroGPU queue...', 'info');
+    const eventResponse = await requestArrayBuffer(`${callEndpoint}/synthesize_zerogpu/${encodeURIComponent(eventId)}`, {
+      headers: {
+        Authorization: `Bearer ${settings.hfToken}`,
+      },
+      serviceName: 'Kokoro ZeroGPU Space',
+      timeout: 240000,
+      useFetchTransport: true,
+    });
+    const result = gradioResultFromEvents(eventResponse);
+    const fileData = Array.isArray(result) ? result[0] : result;
+
+    setStatus('Downloading ZeroGPU audio...', 'info');
+    const audioResponse = await requestArrayBuffer(gradioFileUrl(fileData), {
+      headers: {
+        Authorization: `Bearer ${settings.hfToken}`,
+      },
+      retries: 2,
+      retryStatuses: [429, 500, 502, 503, 504],
+      serviceName: 'Kokoro ZeroGPU Space',
+      timeout: 240000,
+      useFetchTransport: true,
+    });
+    validateAudioResponse(audioResponse, { serviceName: 'Kokoro ZeroGPU Space' });
+    setStatus('Received ZeroGPU audio.', 'info');
+    return audioResponse.response;
   }
 
   async function synthesizeOpenRouterSpeech(text) {
@@ -1437,56 +1331,8 @@
     return extractMimoAudio(response);
   }
 
-  async function synthesizeChunks(chunks) {
-    if (chunks.length === 1) {
-      return [await synthesizeSpeech(chunks[0], 0, 1)];
-    }
-
-    const wavBuffers = new Array(chunks.length);
-    const batchId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-
-    setStatus(`Generating ${chunks.length} small parts (${MAX_PARALLEL_REQUESTS} at a time)...`, 'info');
-
-    for (let start = 0; start < chunks.length && !stopRequested; start += MAX_PARALLEL_REQUESTS) {
-      const wave = chunks.slice(start, start + MAX_PARALLEL_REQUESTS);
-      const first = start + 1;
-      const last = start + wave.length;
-      setStatus(`Generating ${first}-${last}/${chunks.length} in parallel...`, 'info');
-
-      await Promise.all(wave.map(async (chunk, waveIndex) => {
-        const index = start + waveIndex;
-        wavBuffers[index] = await synthesizeSpeech(chunk, index, chunks.length, batchId);
-      }));
-    }
-
-    return wavBuffers;
-  }
-
-  async function decodeGeneratedAudio(wavBuffers) {
-    try {
-      setStatus(wavBuffers.length > 1 ? 'Combining WAV chunks...' : 'Preparing audio...', 'info');
-      const combinedWav = combineWavBuffers(wavBuffers);
-      setStatus('Decoding audio...', 'info');
-      return await decodeAudioBuffer(getAudioContext(), combinedWav);
-    } catch (error) {
-      setStatus(`Fast combine failed; decoding chunks separately: ${error.message}`, 'warn');
-      const decodedBuffers = [];
-      for (let index = 0; index < wavBuffers.length; index += 1) {
-        if (stopRequested) break;
-        setStatus(`Decoding ${index + 1}/${wavBuffers.length}...`, 'info');
-        decodedBuffers.push(await decodeAudioBuffer(getAudioContext(), wavBuffers[index]));
-      }
-      return combineAudioBuffers(decodedBuffers);
-    }
-  }
-
-  async function decodeOpenRouterAudio(audioBytes) {
-    setStatus('Decoding OpenRouter audio...', 'info');
-    return await decodeAudioBuffer(getAudioContext(), audioBytes);
-  }
-
-  async function decodeMimoAudio(audioBytes) {
-    setStatus('Decoding Mimo audio...', 'info');
+  async function decodeGeneratedAudio(audioBytes, serviceName) {
+    setStatus(`Decoding ${serviceName} audio...`, 'info');
     return await decodeAudioBuffer(getAudioContext(), audioBytes);
   }
 
@@ -1501,6 +1347,7 @@
     stopRequested = false;
     const usingOpenRouter = useOpenRouterByok();
     const usingMimo = useMimoByok();
+    const usingGpu = Boolean(!settings.useByok && settings.useGpu);
 
     if (usingOpenRouter && !openRouterApiKey()) {
       setStatus('OpenRouter API key is required when OpenRouter is selected.', 'error');
@@ -1512,16 +1359,29 @@
       return;
     }
 
+    if (usingGpu && !settings.hfToken) {
+      setStatus('Hugging Face token is required when ZeroGPU is selected.', 'error');
+      return;
+    }
+
+    if (!settings.useByok && !usingGpu && !settings.cpuApiKey) {
+      setStatus('CPU Space API key is required when ZeroGPU is not selected.', 'error');
+      return;
+    }
+
     if (usingOpenRouter) {
       try {
         setControlsBusy(true);
         setStatus(`Generating OpenRouter audio (${prepared.length} chars)...`, 'info');
-        const audioBuffer = await decodeOpenRouterAudio(await synthesizeOpenRouterSpeech(prepared));
+        const audioBuffer = await decodeGeneratedAudio(
+          await synthesizeOpenRouterSpeech(prepared),
+          'OpenRouter',
+        );
 
         if (stopRequested) {
           setStatus('Stopped.', 'warn');
         } else {
-          await playCombinedAudio(audioBuffer);
+          await playAudio(audioBuffer);
         }
       } catch (error) {
         if (stopRequested) setStatus('Stopped.', 'warn');
@@ -1536,12 +1396,15 @@
       try {
         setControlsBusy(true);
         setStatus(`Generating Mimo audio (${prepared.length} chars)...`, 'info');
-        const audioBuffer = await decodeMimoAudio(await synthesizeMimoSpeech(prepared));
+        const audioBuffer = await decodeGeneratedAudio(
+          await synthesizeMimoSpeech(prepared),
+          'Mimo',
+        );
 
         if (stopRequested) {
           setStatus('Stopped.', 'warn');
         } else {
-          await playCombinedAudio(audioBuffer);
+          await playAudio(audioBuffer);
         }
       } catch (error) {
         if (stopRequested) setStatus('Stopped.', 'warn');
@@ -1552,24 +1415,19 @@
       return;
     }
 
-    const chunks = splitTextForRequests(prepared);
-
-    if (!chunks.length) {
-      if (latestPreviewEl) latestPreviewEl.textContent = `No ${label} to read.`;
-      return;
-    }
-
     try {
       setControlsBusy(true);
-      setStatus(chunks.length > 1
-        ? `Generating ${chunks.length} small parts, ${Math.min(MAX_PARALLEL_REQUESTS, chunks.length)} at a time...`
-        : `Generating audio (${prepared.length} chars)...`, 'info');
-      const audioBuffer = await decodeGeneratedAudio(await synthesizeChunks(chunks));
+      const serviceName = usingGpu ? 'ZeroGPU' : 'CPU Space';
+      setStatus(`Generating ${serviceName} audio (${prepared.length} chars)...`, 'info');
+      const audioBytes = usingGpu
+        ? await synthesizeGpuSpeech(prepared)
+        : await synthesizeCpuSpeech(prepared);
+      const audioBuffer = await decodeGeneratedAudio(audioBytes, serviceName);
 
       if (stopRequested) {
         setStatus('Stopped.', 'warn');
       } else {
-        await playCombinedAudio(audioBuffer);
+        await playAudio(audioBuffer);
       }
     } catch (error) {
       if (stopRequested) setStatus('Stopped.', 'warn');
@@ -1678,8 +1536,9 @@
     if (voiceSelectEl) {
       rememberVoiceForBackend(activeVoiceBackend, voiceSelectEl.value || voiceForBackend(settings, activeVoiceBackend));
     }
-    settings.apiUrl = cleanBaseUrl(apiUrlInputEl.value);
-    settings.apiKey = apiKeyInputEl.value.trim();
+    settings.cpuApiKey = apiKeyInputEl?.value.trim() || '';
+    settings.hfToken = hfTokenInputEl?.value.trim() || '';
+    settings.useGpu = Boolean(gpuToggleEl?.checked);
     settings.useByok = Boolean(byokToggleEl?.checked);
     settings.byokProvider = activeByokProvider();
     settings.useOpenRouter = useOpenRouterByok();
@@ -1699,43 +1558,77 @@
 
     try {
       saveFromControls();
-      const response = await requestArrayBuffer(`${cleanBaseUrl(settings.apiUrl)}/v1/voices`, {
-        method: 'GET',
-        headers: {
-          'X-API-Key': settings.apiKey,
-        },
-        timeout: 30000,
-      });
+      const loadingGpuVoices = settings.useGpu;
+      let voices;
+      let defaultVoice;
 
-      const text = decodeResponseBody(response);
-      const payload = JSON.parse(text);
-      const voices = Object.entries(payload.voices || {})
-        .filter(([voiceId, info]) => {
-          const gender = String(info?.gender || '').toLowerCase();
-          return gender !== 'male' && !voiceId.startsWith('am_') && !voiceId.startsWith('bm_');
+      if (loadingGpuVoices) {
+        const response = await requestArrayBuffer(`${GPU_SPACE_URL}/config`, {
+          headers: settings.hfToken
+            ? { Authorization: `Bearer ${settings.hfToken}` }
+            : {},
+          serviceName: 'Kokoro ZeroGPU Space',
+          timeout: 30000,
         });
+        const payload = parseJsonResponse(response, 'ZeroGPU configuration');
+        const voiceComponent = (payload.components || []).find((component) => (
+          component.type === 'dropdown' && component.props?.label === 'Voice'
+        ));
+        voices = (voiceComponent?.props?.choices || [])
+          .map((choice) => Array.isArray(choice) ? [choice[1], choice[0]] : [choice, choice])
+          .filter(([voiceId, label]) => voiceId?.[1] === 'f' || /female/iu.test(label));
+        defaultVoice = voiceComponent?.props?.value;
+      } else {
+        if (!settings.cpuApiKey) {
+          setStatus('Enter the CPU Space API key to load voices.', 'warn');
+          return;
+        }
+        const response = await requestArrayBuffer(`${CPU_SPACE_URL}/v1/voices`, {
+          method: 'GET',
+          headers: {
+            'X-API-Key': settings.cpuApiKey,
+          },
+          serviceName: 'Kokoro CPU Space',
+          timeout: 30000,
+        });
+        const payload = parseJsonResponse(response, 'CPU voice list');
+        voices = Object.entries(payload.voices || {})
+          .filter(([voiceId, info]) => {
+            const gender = String(info?.gender || '').toLowerCase();
+            return gender !== 'male' && !voiceId.startsWith('am_') && !voiceId.startsWith('bm_');
+          })
+          .map(([voiceId, info]) => [
+            voiceId,
+            `${voiceId} - ${info.accent || info.language || 'English'} ${info.gender || ''}`.trim(),
+          ]);
+        defaultVoice = payload.default_voice;
+      }
 
       if (!voices.length) throw new Error('No voices returned.');
-      if (settings.useByok || loadToken !== voiceListLoadToken) return;
+      if (
+        settings.useByok
+        || loadingGpuVoices !== settings.useGpu
+        || loadToken !== voiceListLoadToken
+      ) return;
 
       voiceSelectEl.textContent = '';
-      for (const [voiceId, info] of voices) {
+      for (const [voiceId, label] of voices) {
         const option = document.createElement('option');
         option.value = voiceId;
-        option.textContent = `${voiceId} - ${info.accent || 'English'} ${info.gender || ''}`.trim();
+        option.textContent = label;
         voiceSelectEl.append(option);
       }
 
-      const rememberedVoice = voiceForBackend(settings, CLOUD_RUN_BACKEND);
+      const rememberedVoice = voiceForBackend(settings, KOKORO_BACKEND);
       const selectedVoice = voices.some(([voiceId]) => voiceId === rememberedVoice)
         ? rememberedVoice
-        : payload.default_voice && voices.some(([voiceId]) => voiceId === payload.default_voice)
-          ? payload.default_voice
+        : defaultVoice && voices.some(([voiceId]) => voiceId === defaultVoice)
+          ? defaultVoice
           : voices[0][0];
 
-      rememberVoiceForBackend(CLOUD_RUN_BACKEND, selectedVoice);
+      rememberVoiceForBackend(KOKORO_BACKEND, selectedVoice);
       voiceSelectEl.value = selectedVoice;
-      activeVoiceBackend = CLOUD_RUN_BACKEND;
+      activeVoiceBackend = KOKORO_BACKEND;
       voicesLoaded = true;
       saveSettings();
       setStatus(`Loaded ${voices.length} female voices.`, 'ok');
@@ -1790,8 +1683,8 @@
     const loadToken = ++voiceListLoadToken;
     if (!settings.useByok) {
       voicesLoaded = false;
-      settings.voice = voiceForBackend(settings, CLOUD_RUN_BACKEND);
-      showRememberedVoice(CLOUD_RUN_BACKEND);
+      settings.voice = voiceForBackend(settings, KOKORO_BACKEND);
+      showRememberedVoice(KOKORO_BACKEND);
       saveSettings();
       loadVoices(loadToken);
       return;
@@ -1834,6 +1727,7 @@
   function updateByokProviderControls() {
     const provider = activeByokProvider();
     const byokEnabled = Boolean(settings.useByok);
+    const gpuEnabled = Boolean(settings.useGpu);
     if (byokRowEl) {
       byokRowEl.dataset.byokEnabled = String(byokEnabled);
     }
@@ -1854,11 +1748,14 @@
     if (mimoApiKeyFieldEl) {
       mimoApiKeyFieldEl.hidden = !byokEnabled || provider !== 'mimo';
     }
-    if (apiUrlFieldEl) {
-      apiUrlFieldEl.hidden = byokEnabled;
+    if (gpuToggleFieldEl) {
+      gpuToggleFieldEl.hidden = byokEnabled;
     }
     if (apiKeyFieldEl) {
-      apiKeyFieldEl.hidden = byokEnabled;
+      apiKeyFieldEl.hidden = byokEnabled || gpuEnabled;
+    }
+    if (hfTokenFieldEl) {
+      hfTokenFieldEl.hidden = byokEnabled || !gpuEnabled;
     }
     if (openRouterApiKeyInputEl) {
       openRouterApiKeyInputEl.disabled = Boolean(OPENROUTER_API_KEY_OVERRIDE);
@@ -2111,6 +2008,10 @@
         font-size: 12px;
       }
 
+      #${ROOT_ID} .kokoro-toggle-field[hidden] {
+        display: none;
+      }
+
       #${ROOT_ID} .kokoro-toggle-field input {
         width: auto;
         min-height: auto;
@@ -2125,7 +2026,7 @@
       }
 
       #${ROOT_ID} .kokoro-byok-row[data-byok-enabled="false"] {
-        grid-template-columns: minmax(0, 1fr);
+        grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
       #${ROOT_ID} .kokoro-provider-toggle {
@@ -2265,14 +2166,21 @@
     manualTextEl.placeholder = 'Paste text here, including **bold**, *italics*, timestamps, narration, and dialogue.';
     manualTextEl.value = settings.manualText || '';
 
-    apiUrlInputEl = document.createElement('input');
-    apiUrlInputEl.value = settings.apiUrl;
-    apiUrlInputEl.autocomplete = 'off';
-
     apiKeyInputEl = document.createElement('input');
-    apiKeyInputEl.value = settings.apiKey;
+    apiKeyInputEl.value = settings.cpuApiKey;
     apiKeyInputEl.type = 'password';
     apiKeyInputEl.autocomplete = 'off';
+    apiKeyInputEl.placeholder = 'CPU Space API_PASSWORD';
+
+    hfTokenInputEl = document.createElement('input');
+    hfTokenInputEl.value = settings.hfToken;
+    hfTokenInputEl.type = 'password';
+    hfTokenInputEl.autocomplete = 'off';
+    hfTokenInputEl.placeholder = 'hf_... token with read access';
+
+    gpuToggleEl = document.createElement('input');
+    gpuToggleEl.type = 'checkbox';
+    gpuToggleEl.checked = Boolean(settings.useGpu);
 
     byokToggleEl = document.createElement('input');
     byokToggleEl.type = 'checkbox';
@@ -2333,20 +2241,22 @@
     advancedBody.className = 'kokoro-advanced-body';
     byokRowEl = document.createElement('div');
     byokRowEl.className = 'kokoro-byok-row';
+    gpuToggleFieldEl = createCheckboxField('ZeroGPU', gpuToggleEl);
     byokRowEl.append(
       createCheckboxField('Use BYOK', byokToggleEl),
+      gpuToggleFieldEl,
       providerToggleEl,
     );
     openRouterApiKeyFieldEl = createField('OpenRouter API key', openRouterApiKeyInputEl);
     mimoApiKeyFieldEl = createField('Mimo API key', mimoApiKeyInputEl);
-    apiUrlFieldEl = createField('API URL', apiUrlInputEl);
-    apiKeyFieldEl = createField('API key', apiKeyInputEl);
+    apiKeyFieldEl = createField('CPU Space API key', apiKeyInputEl);
+    hfTokenFieldEl = createField('Hugging Face token', hfTokenInputEl);
     advancedBody.append(
       byokRowEl,
       openRouterApiKeyFieldEl,
       mimoApiKeyFieldEl,
-      apiUrlFieldEl,
       apiKeyFieldEl,
+      hfTokenFieldEl,
     );
 
     advanced.append(advancedSummary, advancedBody);
@@ -2412,7 +2322,14 @@
       loadProviderVoices();
       setStatus(settings.useByok
         ? `${activeByokProvider() === 'mimo' ? 'Mimo' : 'OpenRouter'} BYOK selected.`
-        : 'Kokoro API selected.', 'info');
+        : `Kokoro ${settings.useGpu ? 'ZeroGPU' : 'CPU'} Space selected.`, 'info');
+    });
+
+    gpuToggleEl.addEventListener('change', () => {
+      saveFromControls();
+      updateByokProviderControls();
+      loadProviderVoices();
+      setStatus(`Kokoro ${settings.useGpu ? 'ZeroGPU' : 'CPU'} Space selected.`, 'info');
     });
 
     openRouterProviderButtonEl.addEventListener('click', () => {
