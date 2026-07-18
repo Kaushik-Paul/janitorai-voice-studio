@@ -142,15 +142,19 @@ def split_text(text: str, max_chars: int = DEFAULT_SEGMENT_CHARS) -> list[str]:
 
 
 class KokoroWorker:
-    """One model copy. CPU workers are deliberately restricted to one thread."""
+    """A dedicated pipeline that can share a read-only model with other workers."""
 
-    def __init__(self, device: str) -> None:
-        import torch
-        from kokoro import KModel
+    def __init__(self, device: str, model: Any | None = None, torch_module: Any = None) -> None:
+        if torch_module is None:
+            import torch as torch_module
 
         self.device = device
-        self.torch = torch
-        self.model = KModel(repo_id=MODEL_ID).to(device).eval()
+        self.torch = torch_module
+        if model is None:
+            from kokoro import KModel
+
+            model = KModel(repo_id=MODEL_ID).to(device).eval()
+        self.model = model
         self.pipelines: dict[str, Any] = {}
 
     def _pipeline(self, language_code: str):
@@ -166,6 +170,12 @@ class KokoroWorker:
             )
             self.pipelines[language_code] = pipeline
         return pipeline
+
+    def prepare_voice(self, voice_id: str) -> None:
+        """Initialize the language frontend and cache its voice tensor."""
+
+        voice = VOICES[voice_id]
+        self._pipeline(voice.language_code).load_voice(voice_id)
 
     def synthesize_segment(self, text: str, voice_id: str, speed: float) -> np.ndarray:
         voice = VOICES[voice_id]
@@ -210,6 +220,7 @@ class SynthesisResult:
 class ParallelCpuEngine:
     def __init__(self) -> None:
         import torch
+        from kokoro import KModel
 
         # Intra-op threads are process-global. One thread per independent model
         # lets two model calls occupy the two CPU Basic vCPUs without oversubscription.
@@ -219,12 +230,58 @@ class ParallelCpuEngine:
         except RuntimeError:
             pass
 
-        self.workers = [KokoroWorker("cpu") for _ in range(CPU_WORKERS)]
+        # KModel inference is read-only, so both dedicated pipeline workers can
+        # share one set of weights. This halves model initialization and memory
+        # pressure while still allowing two independent inference calls.
+        self.model = KModel(repo_id=MODEL_ID).to("cpu").eval()
+        self.workers = [
+            KokoroWorker("cpu", model=self.model, torch_module=torch)
+            for _ in range(CPU_WORKERS)
+        ]
         self.executors = [
             ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"kokoro-{index}")
             for index in range(CPU_WORKERS)
         ]
         self.request_lock = threading.Lock()
+
+        # Avoid making the first request pay for the default English frontend
+        # and voice load. Other languages remain lazy and are cached after use.
+        for worker in self.workers:
+            worker.prepare_voice(DEFAULT_VOICE)
+
+    def _submit_balanced(
+        self,
+        segments: list[str],
+        voice: str,
+        speed: float,
+    ) -> list[np.ndarray]:
+        """Assign longer segments first to the currently least-loaded worker."""
+
+        worker_loads = [0] * len(self.workers)
+        assignments: list[tuple[int, Any]] = []
+        indexed_segments = sorted(
+            enumerate(segments),
+            key=lambda item: len(item[1]),
+            reverse=True,
+        )
+        for segment_index, segment in indexed_segments:
+            worker_index = min(
+                range(len(self.workers)),
+                key=worker_loads.__getitem__,
+            )
+            worker_loads[worker_index] += len(segment)
+            future = self.executors[worker_index].submit(
+                self.workers[worker_index].synthesize_segment,
+                segment,
+                voice,
+                speed,
+            )
+            assignments.append((segment_index, future))
+
+        ordered_audio: list[np.ndarray | None] = [None] * len(segments)
+        for segment_index, future in assignments:
+            ordered_audio[segment_index] = future.result()
+        return [audio for audio in ordered_audio if audio is not None]
 
     def synthesize(self, text: str, voice: str, speed: float) -> SynthesisResult:
         clean = text.strip()
@@ -243,16 +300,7 @@ class ParallelCpuEngine:
         # Serialize top-level requests: the two cores are used together for one
         # request, giving predictable latency instead of competing Torch jobs.
         with self.request_lock:
-            futures = [
-                self.executors[index % len(self.executors)].submit(
-                    self.workers[index % len(self.workers)].synthesize_segment,
-                    segment,
-                    voice,
-                    speed,
-                )
-                for index, segment in enumerate(segments)
-            ]
-            ordered_audio = [future.result() for future in futures]
+            ordered_audio = self._submit_balanced(segments, voice, speed)
 
         waveform = np.concatenate(ordered_audio)
         processing_seconds = perf_counter() - started
@@ -311,4 +359,3 @@ def get_cpu_engine() -> ParallelCpuEngine:
         if _cpu_engine is None:
             _cpu_engine = ParallelCpuEngine()
     return _cpu_engine
-

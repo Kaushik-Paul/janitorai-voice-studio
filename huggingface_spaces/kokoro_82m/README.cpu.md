@@ -4,7 +4,7 @@ emoji: 🎧
 colorFrom: green
 colorTo: blue
 sdk: gradio
-sdk_version: 6.17.3
+sdk_version: 6.20.0
 python_version: 3.12.12
 app_file: app.py
 suggested_hardware: cpu-basic
@@ -18,7 +18,8 @@ preload_from_hub:
 
 This Space runs Kokoro-82M on the free 2-vCPU CPU Basic hardware. Long input is
 split at sentence boundaries and synthesized by two independent, single-threaded
-model workers. Their output is restored to the original order and joined into one
+pipeline workers sharing one read-only model. Uneven segments are balanced by
+estimated text length, then restored to the original order and joined into one
 WAV file.
 
 Set `API_PASSWORD` as a Space secret. The protected REST routes are:
