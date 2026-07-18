@@ -50,6 +50,13 @@ def require_api_key(
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
+def require_ui_password(supplied_key: str) -> None:
+    if not API_PASSWORD:
+        raise gr.Error("API_PASSWORD is not configured in this Space's secrets")
+    if not supplied_key or not secrets.compare_digest(supplied_key, API_PASSWORD):
+        raise gr.Error("Invalid API password")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     get_cpu_engine()
@@ -71,8 +78,8 @@ api.add_middleware(
 )
 
 
-@api.get("/")
-def root() -> dict[str, str]:
+@api.get("/api")
+def api_information() -> dict[str, str]:
     return {
         "service": "Kokoro-82M CPU API",
         "status": "running",
@@ -80,7 +87,7 @@ def root() -> dict[str, str]:
         "health": "/health",
         "voices": "/v1/voices",
         "speech": "/v1/audio/speech",
-        "ui": "/ui",
+        "ui": "/",
     }
 
 
@@ -141,7 +148,8 @@ def create_speech(payload: SpeechRequest) -> StreamingResponse:
     )
 
 
-def synthesize_for_ui(text: str, voice: str, speed: float):
+def synthesize_for_ui(text: str, voice: str, speed: float, password: str):
+    require_ui_password(password)
     result = get_cpu_engine().synthesize(text, voice, speed)
     return (result.sample_rate, result.waveform)
 
@@ -164,21 +172,25 @@ with gr.Blocks(title="Kokoro-82M - CPU") as demo:
     )
     voice_input = gr.Dropdown(choices=voice_choices, value=DEFAULT_VOICE, label="Voice")
     speed_input = gr.Slider(0.5, 2.0, value=1.0, step=0.05, label="Speed")
+    password_input = gr.Textbox(
+        label="API password",
+        type="password",
+        placeholder="Enter the same password used by X-API-Key",
+    )
     generate_button = gr.Button("Generate", variant="primary")
     audio_output = gr.Audio(label="Generated speech")
     generate_button.click(
         synthesize_for_ui,
-        inputs=[text_input, voice_input, speed_input],
+        inputs=[text_input, voice_input, speed_input, password_input],
         outputs=audio_output,
         api_name="synthesize_cpu",
     )
 
 
-app = gr.mount_gradio_app(api, demo, path="/ui")
+app = gr.mount_gradio_app(api, demo, path="/", ssr_mode=False)
 
 
 if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=7860)
-

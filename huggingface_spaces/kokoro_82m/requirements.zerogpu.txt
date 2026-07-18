@@ -1,5 +1,5 @@
-fastapi==0.115.14
-gradio==5.49.1
+fastapi==0.139.0
+gradio==6.17.3
 huggingface-hub==0.36.0
 kokoro==0.9.4
 misaki[ja,zh]>=0.9.4
