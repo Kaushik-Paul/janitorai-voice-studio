@@ -6,7 +6,7 @@ colorTo: indigo
 sdk: gradio
 sdk_version: 6.17.3
 python_version: 3.12.12
-app_file: app_zerogpu.py
+app_file: app.py
 suggested_hardware: zero-a10g
 models:
   - neuphonic/neutts-air
@@ -25,3 +25,8 @@ Select **ZeroGPU** in the Space hardware settings after uploading these files.
 Authenticated API calls should pass a Hugging Face token so quota is charged to
 the calling account. See `README.cpu.md` or the project documentation for the
 free CPU REST deployment and the explanation of reference-based tone control.
+
+Set `API_PASSWORD` as a Space secret. The visible web interface requires this
+password before generation. It is not an extra parameter on the
+`synthesize_zerogpu(text, voice, speed)` API endpoint; API callers continue to
+authenticate with their Hugging Face token.

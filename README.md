@@ -108,8 +108,11 @@ The CPU web UI and REST API use the same password. The UI asks for it when
 Create another public Gradio Space, for example
 `your-name/kokoro-82m-zerogpu`, and select `ZeroGPU` hardware.
 
-Do not add `API_PASSWORD` to this Space. ZeroGPU API calls use the caller's
-Hugging Face token. This is required for ZeroGPU quota and queue accounting.
+Add `API_PASSWORD` to this Space's secrets (it can be the same value as the CPU
+Space). This password protects only the visible Generate form. ZeroGPU API
+calls keep the existing `text`, `voice`, and `speed` parameters and use the
+caller's Hugging Face token for quota and queue accounting; they do not send
+`API_PASSWORD`.
 Create a read token at <https://huggingface.co/settings/tokens> for use in the
 userscript; a write token is not needed for inference.
 

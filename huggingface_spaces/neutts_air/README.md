@@ -73,7 +73,9 @@ start.
 
 Create a second Gradio Space, copy this same folder into it, and replace this
 README with `README.zerogpu.md`. Then select **ZeroGPU** in the Space hardware
-settings.
+settings. Add `API_PASSWORD` as a Space secret to protect generation through
+the visible web form. The named ZeroGPU API keeps its existing three inputs and
+continues to use the caller's Hugging Face token instead of this UI password.
 
 ZeroGPU uses `app_zerogpu.py` and the BF16 PyTorch model, not the Q4 GGUF
 model. This is intentional: ZeroGPU's CUDA lifecycle is designed for PyTorch,
