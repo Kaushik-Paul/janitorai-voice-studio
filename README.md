@@ -14,6 +14,10 @@ The project has two pieces:
   [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) and returns generated
   speech as WAV audio. You can skip this entire backend setup when using
   Mimo or OpenRouter BYOK mode.
+- `huggingface_spaces/neutts_air` contains deployable free-CPU and ZeroGPU
+  profiles for [NeuTTS Air](https://huggingface.co/neuphonic/neutts-air-q4-gguf).
+  The CPU profile preserves the private backend's `/v1/voices` and
+  `/v1/audio/speech` routes.
 
 ## What This Is For
 
@@ -110,6 +114,13 @@ hosted provider endpoints directly from the browser userscript.
 
 ```text
 kokoro-cloud-run/
+├── huggingface_spaces/
+│   └── neutts_air/
+│       ├── app.py
+│       ├── app_zerogpu.py
+│       ├── core.py
+│       ├── README.md
+│       └── requirements.txt
 ├── main/
 │   ├── __init__.py
 │   └── app.py
@@ -124,6 +135,11 @@ kokoro-cloud-run/
 ├── README.md
 └── requirements.txt
 ```
+
+The NeuTTS Air folder is an independently uploadable Hugging Face Space
+bundle. Its own README explains the two-Space deployment, API calls, and the
+important difference between Mimo-style text instructions and NeuTTS Air's
+reference-recording-based tone control.
 
 `demo.html` is a local JanitorAI chat snapshot used while tuning message
 extraction.
