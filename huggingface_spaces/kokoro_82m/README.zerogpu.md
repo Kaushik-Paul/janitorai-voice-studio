@@ -4,7 +4,7 @@ emoji: ⚡
 colorFrom: yellow
 colorTo: green
 sdk: gradio
-sdk_version: 6.17.3
+sdk_version: 6.20.0
 python_version: 3.12.12
 app_file: app_zerogpu.py
 suggested_hardware: zero-a10g

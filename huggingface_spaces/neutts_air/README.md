@@ -102,3 +102,14 @@ print(audio_path)
 
 The queued API is required for correct ZeroGPU scheduling and quota handling;
 it is not the same single-request WAV REST response used by the CPU Space.
+
+## Uploading both Spaces
+
+Authenticate once with `hf auth login`, then run this from the repository root:
+
+```bash
+python3 huggingface_spaces/neutts_air/upload_spaces.py
+```
+
+Use `--dry-run` to validate the exact CPU and ZeroGPU manifests without
+uploading, or `--target cpu` / `--target zerogpu` to update only one Space.

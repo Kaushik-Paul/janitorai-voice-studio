@@ -95,7 +95,7 @@ def api_information() -> dict[str, str]:
 def health() -> dict[str, str | int]:
     return {
         "status": "ok",
-        "runtime": "cpu-basic-parallel-2",
+        "runtime": "cpu-basic-parallel-2-shared-model",
         "model": MODEL_ID,
         "sample_rate": SAMPLE_RATE,
     }
