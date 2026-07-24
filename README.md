@@ -62,6 +62,9 @@ kokoro-cloud-run/
 │       └── upload_spaces.py
 ├── main/
 │   └── app.py                        # optional Cloud Run backend
+├── cloud_run_function/
+│   ├── main.py                       # daily Hugging Face keep-alive function
+│   └── README.md                     # deployment details
 ├── scripts/
 │   ├── deploy_cloud_run.py
 │   └── download_model.py
@@ -73,6 +76,26 @@ kokoro-cloud-run/
 
 The NeuTTS Air folder is an independent pair of Hugging Face Space bundles. Its
 README explains its reference-recording-based tone control.
+
+## Keep Hugging Face Spaces Awake
+
+The private Cloud Run function `hf-space-keepalive` is deployed in
+`asia-south1` in project `adept-fountain-349605`. Cloud Scheduler job
+`hf-space-keepalive-daily` invokes it every day at **08:00 Asia/Kolkata** to
+ping the Kokoro CPU/ZeroGPU, NeuTTS Air CPU/ZeroGPU, and two Manga Translator
+Spaces without running model inference. Scheduler uses OIDC, and the token for
+the private Manga copy is stored in Secret Manager.
+
+Run an immediate check with:
+
+```bash
+gcloud scheduler jobs run hf-space-keepalive-daily \
+  --project=adept-fountain-349605 \
+  --location=asia-south1
+```
+
+See [`cloud_run_function/README.md`](cloud_run_function/README.md) for the
+resource names, tests, and implementation details.
 
 ## Deploy Kokoro to Hugging Face Spaces
 
