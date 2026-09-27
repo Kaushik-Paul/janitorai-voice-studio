@@ -68,6 +68,11 @@ SPACES = (
         "media-toolbox-cpu",
         "https://kaushikpaul-media-toolbox-cpu.hf.space/",
     ),
+    Space(
+        "Open-WebUI-Surplus",
+        "https://kaushikpaul-open-webui-surplus.hf.space/health",
+        requires_auth=True,
+    ),
 )
 
 

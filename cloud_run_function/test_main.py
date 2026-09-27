@@ -91,7 +91,7 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "application/json")
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["spaces_checked"], 10)
+        self.assertEqual(payload["spaces_checked"], len(main.SPACES))
 
     @mock.patch("keepalive_main.ping_space")
     def test_handler_requests_retry_when_any_space_fails(self, ping_space):
