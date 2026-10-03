@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JanitorAI Voice Studio
 // @namespace    https://www.kokoro.pp.ua/
-// @version      1.7.1
+// @version      1.8.0
 // @description  Read JanitorAI messages, selected text, or typed text with Kokoro Hugging Face Spaces or BYOK providers.
 // @author       Kaushik Paul
 // @match        https://janitorai.com/chats/*
@@ -36,6 +36,10 @@
     kokoroVoice: 'af_heart',
     openRouterVoice: 'af_heart',
     mimoVoice: 'Chloe',
+    panelWidth: null,
+    panelHeight: null,
+    panelLeft: null,
+    panelTop: null,
   };
 
   const OPENROUTER_API_KEY_OVERRIDE = '';
@@ -76,7 +80,7 @@
 
   const STORAGE_KEY = 'janitor-kokoro-tts-settings-v2';
   const ROOT_ID = 'kokoro-tts-root';
-  const USER_SCRIPT_VERSION = '1.7.1';
+  const USER_SCRIPT_VERSION = '1.8.0';
   const MAX_TEXT_CHARS = 5900;
   const ACTION_TEXT_PATTERN = /^(copy|edit|copy\s*edit|copyedit|delete|regenerate|continue|retry|swipe|report|more|less)$/i;
   const KOKORO_BACKEND = 'kokoro';
@@ -84,6 +88,10 @@
   const GPU_SPACE_URL = 'https://apizero.kokoro.pp.ua';
   const GRADIO_API_PREFIX = '/gradio_api';
   const PANEL_EDGE_MARGIN = 8;
+  const PANEL_DEFAULT_WIDTH = 380;
+  const PANEL_MIN_WIDTH = 280;
+  const PANEL_MIN_HEIGHT = 220;
+  const RESIZE_DIRECTIONS = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
 
   let settings = loadSettings();
   let root;
@@ -130,6 +138,12 @@
   let voiceListLoadToken = 0;
   let activeVoiceBackend = voiceBackendFromSettings(settings);
   let panelDragState = null;
+  let panelResizeState = null;
+  let collapseButtonEl;
+  let miniReadButtonEl;
+  let miniStatusEl;
+  let isBusy = false;
+  let previewRefreshTimer = null;
 
   function loadSettings() {
     try {
@@ -235,13 +249,19 @@
   }
 
   function setStatus(message, tone = 'info') {
+    if (miniStatusEl) {
+      miniStatusEl.textContent = message;
+      miniStatusEl.title = message;
+      miniStatusEl.dataset.tone = tone;
+    }
     if (!statusEl) return;
     statusEl.textContent = message;
     statusEl.dataset.tone = tone;
   }
 
-  function setTextPreview(label, value) {
+  function setTextPreview(label, value, fromLatestScan = false) {
     if (!latestPreviewEl) return;
+    latestPreviewEl.dataset.auto = String(fromLatestScan);
 
     const text = textForSpeech(value);
     if (!text) {
@@ -729,7 +749,7 @@
   function findLatestText() {
     const renderedBotText = findLatestRenderedBotText();
     if (renderedBotText) {
-      setTextPreview('Latest bot message', renderedBotText);
+      setTextPreview('Latest bot message', renderedBotText, true);
       return renderedBotText;
     }
 
@@ -737,6 +757,7 @@
 
     if (!candidates.length) {
       latestPreviewEl.textContent = 'No latest bot message found. Use selected text or the text box.';
+      latestPreviewEl.dataset.auto = 'true';
       return '';
     }
 
@@ -757,7 +778,7 @@
     });
 
     const text = cleanExtractedMessageText(best.text);
-    setTextPreview('Latest message candidate', text);
+    setTextPreview('Latest message candidate', text, true);
     return text;
   }
 
@@ -848,11 +869,11 @@
               return;
             }
 
-            reject(new Error('Kokoro request timed out.'));
+            reject(new Error(`${serviceName} request timed out.`));
           },
           onabort: () => {
             activeRequests.delete(request);
-            reject(new Error('Kokoro request aborted.'));
+            reject(new Error(`${serviceName} request aborted.`));
           },
         });
         activeRequests.add(request);
@@ -932,6 +953,28 @@
     if (timeEl) {
       timeEl.textContent = `${formatTime(offset)} / ${formatTime(duration)}`;
     }
+
+    if (root) {
+      root.style.setProperty('--kvs-progress', duration > 0 ? String(offset / duration) : '0');
+    }
+
+    updateMiniControls();
+  }
+
+  function isAudioActive() {
+    return isBusy || Boolean(activeAudioSource && !isPlaybackPaused);
+  }
+
+  function updateMiniControls() {
+    if (!miniReadButtonEl) return;
+
+    const active = isAudioActive();
+    miniReadButtonEl.dataset.state = active ? 'stop' : 'read';
+    miniReadButtonEl.textContent = active ? '\u25A0 Stop' : '\u25B6 Read';
+    miniReadButtonEl.title = active
+      ? 'Stop generation and playback (Alt+Shift+S)'
+      : 'Read the latest bot message (Alt+Shift+R)';
+    root?.toggleAttribute('data-active', active);
   }
 
   function startPlaybackTimer() {
@@ -1081,7 +1124,11 @@
 
     return new Promise((resolve, reject) => {
       try {
-        activePlaybackResolve = resolve;
+        activePlaybackResolve = () => {
+          if (!stopRequested && activeAudioBuffer === audioBuffer) setStatus('Finished playing.', 'ok');
+          resolve();
+        };
+        setStatus(`Playing ${formatTime(audioBuffer.duration)} of audio.`, 'ok');
         startCurrentAudio(0);
       } catch (error) {
         cleanupAudio(true);
@@ -1449,6 +1496,8 @@
   }
 
   function setControlsBusy(busy) {
+    isBusy = Boolean(busy);
+    updateMiniControls();
     root?.querySelectorAll('[data-action="read-latest"], [data-action="read-selected"], [data-action="read-box"], [data-action="test"]')
       .forEach((button) => {
         button.disabled = busy;
@@ -1779,9 +1828,16 @@
     }
   }
 
+  function viewportLimits() {
+    return {
+      maxWidth: Math.max(PANEL_MIN_WIDTH, window.innerWidth - (PANEL_EDGE_MARGIN * 2)),
+      maxHeight: Math.max(PANEL_MIN_HEIGHT, window.innerHeight - (PANEL_EDGE_MARGIN * 2)),
+    };
+  }
+
   function clampedPanelPosition(left, top) {
     const rect = root?.getBoundingClientRect?.();
-    const width = rect?.width || 360;
+    const width = rect?.width || PANEL_DEFAULT_WIDTH;
     const height = rect?.height || 80;
     const maxLeft = Math.max(PANEL_EDGE_MARGIN, window.innerWidth - width - PANEL_EDGE_MARGIN);
     const maxTop = Math.max(PANEL_EDGE_MARGIN, window.innerHeight - Math.min(height, window.innerHeight - (PANEL_EDGE_MARGIN * 2)) - PANEL_EDGE_MARGIN);
@@ -1802,11 +1858,59 @@
     root.style.bottom = 'auto';
   }
 
-  function keepPanelInViewport() {
+  function applyPanelSize() {
+    if (!root) return;
+
+    const { maxWidth, maxHeight } = viewportLimits();
+    const width = Number(settings.panelWidth);
+    const height = Number(settings.panelHeight);
+
+    root.style.width = width
+      ? `${Math.min(Math.max(width, PANEL_MIN_WIDTH), maxWidth)}px`
+      : '';
+    root.style.height = height && !settings.collapsed
+      ? `${Math.min(Math.max(height, PANEL_MIN_HEIGHT), maxHeight)}px`
+      : '';
+  }
+
+  function savePanelPosition() {
     if (!root || !root.style.left || !root.style.top) return;
 
     const rect = root.getBoundingClientRect();
+    settings.panelLeft = Math.round(rect.left);
+    settings.panelTop = Math.round(rect.top);
+    saveSettings();
+  }
+
+  function keepPanelInViewport() {
+    if (!root) return;
+
+    applyPanelSize();
+    if (!root.style.left || !root.style.top) return;
+
+    const rect = root.getBoundingClientRect();
     setPanelPosition(rect.left, rect.top);
+  }
+
+  function restorePanelLayout() {
+    applyPanelSize();
+    if (Number.isFinite(settings.panelLeft) && Number.isFinite(settings.panelTop)) {
+      setPanelPosition(settings.panelLeft, settings.panelTop);
+    }
+  }
+
+  function resetPanelLayout() {
+    if (!root) return;
+
+    settings.panelWidth = null;
+    settings.panelHeight = null;
+    settings.panelLeft = null;
+    settings.panelTop = null;
+    saveSettings();
+    ['left', 'top', 'right', 'bottom', 'width', 'height'].forEach((property) => {
+      root.style.removeProperty(property);
+    });
+    setStatus('Panel size and position reset.', 'info');
   }
 
   function startPanelDrag(event, handle) {
@@ -1839,7 +1943,112 @@
     panelDragState = null;
     delete root.dataset.dragging;
     setPanelPosition(rect.left, rect.top);
+    savePanelPosition();
     event.preventDefault();
+  }
+
+  function startPanelResize(event, handle) {
+    if (!root) return;
+    if (event.button !== undefined && event.button !== 0) return;
+
+    const rect = root.getBoundingClientRect();
+    panelResizeState = {
+      pointerId: event.pointerId,
+      direction: handle.dataset.resize,
+      startX: event.clientX,
+      startY: event.clientY,
+      rect,
+    };
+    root.dataset.resizing = 'true';
+    setPanelPosition(rect.left, rect.top);
+    handle.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function resizePanel(event) {
+    const state = panelResizeState;
+    if (!state || event.pointerId !== state.pointerId) return;
+
+    const { rect, direction } = state;
+    const dx = event.clientX - state.startX;
+    const dy = event.clientY - state.startY;
+    let { left, top, width, height } = rect;
+
+    if (direction.includes('e')) {
+      width = Math.min(Math.max(rect.width + dx, PANEL_MIN_WIDTH), window.innerWidth - PANEL_EDGE_MARGIN - rect.left);
+    }
+    if (direction.includes('w')) {
+      width = Math.min(Math.max(rect.width - dx, PANEL_MIN_WIDTH), rect.right - PANEL_EDGE_MARGIN);
+      left = rect.right - width;
+    }
+    if (!settings.collapsed && direction.includes('s')) {
+      height = Math.min(Math.max(rect.height + dy, PANEL_MIN_HEIGHT), window.innerHeight - PANEL_EDGE_MARGIN - rect.top);
+    }
+    if (!settings.collapsed && direction.includes('n')) {
+      height = Math.min(Math.max(rect.height - dy, PANEL_MIN_HEIGHT), rect.bottom - PANEL_EDGE_MARGIN);
+      top = rect.bottom - height;
+    }
+
+    root.style.left = `${left}px`;
+    root.style.top = `${top}px`;
+    root.style.width = `${width}px`;
+    if (!settings.collapsed && /[ns]/.test(direction)) {
+      root.style.height = `${height}px`;
+    }
+    event.preventDefault();
+  }
+
+  function stopPanelResize(event, handle) {
+    const state = panelResizeState;
+    if (!state || event.pointerId !== state.pointerId) return;
+
+    handle.releasePointerCapture?.(event.pointerId);
+    panelResizeState = null;
+    delete root.dataset.resizing;
+
+    const rect = root.getBoundingClientRect();
+    settings.panelWidth = Math.round(rect.width);
+    if (!settings.collapsed && /[ns]/.test(state.direction)) {
+      settings.panelHeight = Math.round(rect.height);
+    }
+    saveSettings();
+    savePanelPosition();
+    event.preventDefault();
+  }
+
+  function setCollapsed(collapsed) {
+    settings.collapsed = Boolean(collapsed);
+    root.classList.toggle('kokoro-collapsed', settings.collapsed);
+    if (collapseButtonEl) {
+      collapseButtonEl.textContent = settings.collapsed ? 'Open' : 'Hide';
+      collapseButtonEl.title = settings.collapsed ? 'Expand the panel' : 'Collapse the panel';
+      collapseButtonEl.setAttribute('aria-expanded', String(!settings.collapsed));
+    }
+    saveSettings();
+    applyPanelSize();
+    if (!settings.collapsed && !isBusy) refreshLatestPreview();
+    requestAnimationFrame(keepPanelInViewport);
+  }
+
+  function refreshLatestPreview() {
+    if (!latestPreviewEl || latestPreviewEl.dataset.auto === 'false') return;
+    findLatestText();
+  }
+
+  function scheduleLatestPreviewRefresh(mutations) {
+    if (settings.collapsed || isBusy || !root) return;
+    if (mutations.every((mutation) => root.contains(mutation.target))) return;
+
+    clearTimeout(previewRefreshTimer);
+    previewRefreshTimer = setTimeout(refreshLatestPreview, 1200);
+  }
+
+  async function readLatestMessage() {
+    if (!await prepareAudioFromClick()) return;
+    saveFromControls();
+    if (!settings.useByok) await loadVoices();
+    await speakText(findLatestText(), 'latest message');
   }
 
   function buildUi() {
@@ -1847,56 +2056,183 @@
 
     GM_addStyle(`
       #${ROOT_ID} {
+        --kvs-bg: #0f172a;
+        --kvs-surface: rgba(255, 255, 255, 0.04);
+        --kvs-surface-strong: #1e293b;
+        --kvs-surface-hover: #334155;
+        --kvs-border: rgba(148, 163, 184, 0.22);
+        --kvs-text: #f1f5f9;
+        --kvs-muted: #94a3b8;
+        --kvs-accent: #6366f1;
+        --kvs-accent-hover: #818cf8;
+        --kvs-danger: #b91c1c;
+        --kvs-danger-hover: #dc2626;
+        --kvs-progress: 0;
         position: fixed;
         z-index: 2147483647;
         right: 14px;
         bottom: 14px;
-        width: min(360px, calc(100vw - 28px));
-        max-height: min(720px, calc(100vh - 28px));
-        overflow: auto;
-        color: #f8fafc;
-        background: #111827;
-        border: 1px solid rgba(255, 255, 255, 0.14);
-        border-radius: 8px;
-        box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
+        display: flex;
+        flex-direction: column;
+        width: min(${PANEL_DEFAULT_WIDTH}px, calc(100vw - ${PANEL_EDGE_MARGIN * 2}px));
+        max-width: calc(100vw - ${PANEL_EDGE_MARGIN * 2}px);
+        max-height: calc(100vh - ${PANEL_EDGE_MARGIN * 2}px);
+        min-width: min(${PANEL_MIN_WIDTH}px, calc(100vw - ${PANEL_EDGE_MARGIN * 2}px));
+        container-name: kvs;
+        container-type: inline-size;
+        color: var(--kvs-text);
+        background: var(--kvs-bg);
+        border: 1px solid var(--kvs-border);
+        border-radius: 12px;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(0, 0, 0, 0.2);
         font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         font-size: 13px;
-        line-height: 1.35;
+        line-height: 1.4;
+        text-align: left;
       }
 
       #${ROOT_ID} * {
         box-sizing: border-box;
       }
 
-      #${ROOT_ID}.kokoro-collapsed .kokoro-body {
-        display: none;
-      }
-
-      #${ROOT_ID}[data-dragging="true"] {
+      #${ROOT_ID}[data-dragging="true"],
+      #${ROOT_ID}[data-resizing="true"] {
         user-select: none;
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6), 0 0 0 2px var(--kvs-accent);
       }
 
       #${ROOT_ID} .kokoro-header {
+        position: relative;
         display: flex;
+        flex: none;
         align-items: center;
-        justify-content: space-between;
-        gap: 10px;
-        padding: 10px 12px;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+        gap: 8px;
+        padding: 8px 8px 8px 12px;
+        border-bottom: 1px solid var(--kvs-border);
+        border-radius: 12px 12px 0 0;
+        background: linear-gradient(180deg, rgba(99, 102, 241, 0.16), rgba(99, 102, 241, 0.02));
         cursor: move;
         touch-action: none;
         user-select: none;
       }
 
+      #${ROOT_ID}.kokoro-collapsed .kokoro-header {
+        border-bottom: 0;
+        border-radius: 12px;
+      }
+
+      #${ROOT_ID} .kokoro-header::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        bottom: -1px;
+        height: 2px;
+        width: calc(var(--kvs-progress) * 100%);
+        background: var(--kvs-accent);
+        border-radius: 0 2px 2px 0;
+        pointer-events: none;
+      }
+
+      #${ROOT_ID} .kokoro-title-group {
+        display: grid;
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+
       #${ROOT_ID} .kokoro-title {
+        overflow: hidden;
         font-weight: 700;
         letter-spacing: 0;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+
+      #${ROOT_ID} .kokoro-title::before {
+        content: "";
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        margin-right: 8px;
+        border-radius: 50%;
+        background: var(--kvs-muted);
+        vertical-align: 1px;
+      }
+
+      #${ROOT_ID}[data-active] .kokoro-title::before {
+        background: #22c55e;
+        box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.25);
+      }
+
+      #${ROOT_ID} .kokoro-mini-status {
+        display: none;
+        overflow: hidden;
+        color: var(--kvs-muted);
+        font-size: 11px;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+
+      #${ROOT_ID} .kokoro-mini-status[data-tone="ok"] { color: #86efac; }
+      #${ROOT_ID} .kokoro-mini-status[data-tone="warn"] { color: #fcd34d; }
+      #${ROOT_ID} .kokoro-mini-status[data-tone="error"] { color: #fca5a5; }
+
+      #${ROOT_ID}.kokoro-collapsed .kokoro-mini-status {
+        display: block;
+      }
+
+      #${ROOT_ID} .kokoro-header-actions {
+        display: flex;
+        flex: none;
+        gap: 6px;
+      }
+
+      #${ROOT_ID} .kokoro-header-actions button {
+        width: auto;
+        min-width: 64px;
+        min-height: 32px;
+        padding: 5px 12px;
+      }
+
+      #${ROOT_ID} .kokoro-header-actions button[data-action="mini-read"] {
+        display: none;
+        min-width: 78px;
+      }
+
+      #${ROOT_ID}.kokoro-collapsed .kokoro-header-actions button[data-action="mini-read"] {
+        display: inline-block;
+      }
+
+      #${ROOT_ID} button[data-action="mini-read"][data-state="stop"] {
+        border-color: transparent;
+        background: var(--kvs-danger);
+      }
+
+      #${ROOT_ID} button[data-action="mini-read"][data-state="stop"]:hover:not(:disabled) {
+        background: var(--kvs-danger-hover);
       }
 
       #${ROOT_ID} .kokoro-body {
         display: grid;
+        flex: 1 1 auto;
+        min-height: 0;
+        grid-template-columns: minmax(0, 1fr);
+        align-content: start;
         gap: 10px;
         padding: 12px;
+        overflow: auto;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+      }
+
+      #${ROOT_ID}.kokoro-collapsed .kokoro-body {
+        display: none;
+      }
+
+      #${ROOT_ID} .kokoro-col {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        min-width: 0;
       }
 
       #${ROOT_ID} .kokoro-row {
@@ -1909,9 +2245,9 @@
         display: grid;
         gap: 8px;
         padding: 8px;
-        border: 1px solid rgba(255, 255, 255, 0.11);
-        border-radius: 6px;
-        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--kvs-border);
+        border-radius: 8px;
+        background: var(--kvs-surface);
       }
 
       #${ROOT_ID} .kokoro-controls {
@@ -1929,8 +2265,9 @@
 
       #${ROOT_ID} .kokoro-time {
         min-width: 72px;
-        color: #cbd5e1;
+        color: var(--kvs-muted);
         font-size: 12px;
+        font-variant-numeric: tabular-nums;
         text-align: right;
         white-space: nowrap;
       }
@@ -1940,10 +2277,11 @@
       #${ROOT_ID} select,
       #${ROOT_ID} textarea {
         width: 100%;
-        border: 1px solid rgba(255, 255, 255, 0.16);
-        border-radius: 6px;
-        color: #f8fafc;
-        background: #1f2937;
+        margin: 0;
+        border: 1px solid var(--kvs-border);
+        border-radius: 8px;
+        color: var(--kvs-text);
+        background: var(--kvs-surface-strong);
         font: inherit;
       }
 
@@ -1951,43 +2289,82 @@
         min-height: 34px;
         padding: 7px 9px;
         font-weight: 650;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
         cursor: pointer;
+        transition: background-color 120ms ease, border-color 120ms ease;
       }
 
-      #${ROOT_ID} button:hover {
-        background: #374151;
+      #${ROOT_ID} button:hover:not(:disabled) {
+        background: var(--kvs-surface-hover);
+      }
+
+      #${ROOT_ID} button:focus-visible,
+      #${ROOT_ID} input:focus-visible,
+      #${ROOT_ID} select:focus-visible,
+      #${ROOT_ID} textarea:focus-visible,
+      #${ROOT_ID} summary:focus-visible {
+        outline: 2px solid var(--kvs-accent-hover);
+        outline-offset: 1px;
       }
 
       #${ROOT_ID} button:disabled {
-        cursor: wait;
-        opacity: 0.55;
+        cursor: not-allowed;
+        opacity: 0.5;
+      }
+
+      #${ROOT_ID} button[data-action="read-latest"],
+      #${ROOT_ID} button[data-action="mini-read"] {
+        border-color: transparent;
+        background: var(--kvs-accent);
+      }
+
+      #${ROOT_ID} button[data-action="read-latest"]:hover:not(:disabled),
+      #${ROOT_ID} button[data-action="mini-read"]:hover:not(:disabled) {
+        background: var(--kvs-accent-hover);
       }
 
       #${ROOT_ID} button[data-action="stop"] {
-        background: #7f1d1d;
+        border-color: transparent;
+        background: var(--kvs-danger);
+      }
+
+      #${ROOT_ID} button[data-action="stop"]:hover:not(:disabled) {
+        background: var(--kvs-danger-hover);
       }
 
       #${ROOT_ID} input,
       #${ROOT_ID} select {
-        min-height: 32px;
+        min-height: 34px;
         padding: 6px 8px;
       }
 
       #${ROOT_ID} input[type="range"] {
         min-height: 24px;
         padding: 0;
+        border: 0;
+        background: transparent;
+        accent-color: var(--kvs-accent);
       }
 
       #${ROOT_ID} textarea {
-        min-height: 118px;
+        flex: 1 1 auto;
+        min-height: 110px;
         resize: vertical;
         padding: 8px;
         white-space: pre-wrap;
       }
 
       #${ROOT_ID} .kokoro-field {
-        display: grid;
+        display: flex;
+        flex-direction: column;
         gap: 4px;
+        min-width: 0;
+      }
+
+      #${ROOT_ID} .kokoro-text-field {
+        flex: 1 1 auto;
       }
 
       #${ROOT_ID} .kokoro-field[hidden] {
@@ -1995,8 +2372,9 @@
       }
 
       #${ROOT_ID} .kokoro-field > span {
-        color: #cbd5e1;
+        color: var(--kvs-muted);
         font-size: 12px;
+        font-weight: 600;
       }
 
       #${ROOT_ID} .kokoro-toggle-field {
@@ -2004,8 +2382,9 @@
         align-items: center;
         gap: 8px;
         min-height: 32px;
-        color: #cbd5e1;
+        color: var(--kvs-muted);
         font-size: 12px;
+        cursor: pointer;
       }
 
       #${ROOT_ID} .kokoro-toggle-field[hidden] {
@@ -2016,26 +2395,28 @@
         width: auto;
         min-height: auto;
         margin: 0;
+        accent-color: var(--kvs-accent);
       }
 
       #${ROOT_ID} .kokoro-byok-row {
-        display: grid;
-        grid-template-columns: minmax(108px, 0.7fr) minmax(200px, 1.3fr);
+        display: flex;
+        flex-wrap: wrap;
         align-items: center;
-        gap: 8px;
+        gap: 8px 12px;
       }
 
-      #${ROOT_ID} .kokoro-byok-row[data-byok-enabled="false"] {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+      #${ROOT_ID} .kokoro-byok-row > .kokoro-toggle-field {
+        flex: none;
       }
 
       #${ROOT_ID} .kokoro-provider-toggle {
         display: grid;
+        flex: 1 1 180px;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         padding: 2px;
-        border: 1px solid rgba(255, 255, 255, 0.16);
-        border-radius: 6px;
-        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--kvs-border);
+        border-radius: 8px;
+        background: var(--kvs-surface);
       }
 
       #${ROOT_ID} .kokoro-provider-toggle[hidden] {
@@ -2046,91 +2427,222 @@
         min-height: 28px;
         padding: 5px 7px;
         border: 0;
+        border-radius: 6px;
         background: transparent;
         font-size: 12px;
-        white-space: nowrap;
       }
 
       #${ROOT_ID} .kokoro-provider-toggle button[data-active="true"] {
-        background: #2563eb;
+        background: var(--kvs-accent);
       }
 
       #${ROOT_ID} .kokoro-advanced {
-        display: grid;
-        gap: 8px;
+        border: 1px solid var(--kvs-border);
+        border-radius: 8px;
+        background: var(--kvs-surface);
       }
 
       #${ROOT_ID} .kokoro-advanced > summary {
-        min-height: 32px;
-        padding: 7px 9px;
-        border: 1px solid rgba(255, 255, 255, 0.16);
-        border-radius: 6px;
-        color: #f8fafc;
-        background: #1f2937;
+        padding: 8px 10px;
+        color: var(--kvs-text);
         font-weight: 650;
         cursor: pointer;
+        user-select: none;
       }
 
       #${ROOT_ID} .kokoro-advanced-body {
         display: grid;
         gap: 8px;
+        padding: 0 10px 10px;
+      }
+
+      #${ROOT_ID} .kokoro-hint {
+        color: var(--kvs-muted);
+        font-size: 11px;
       }
 
       #${ROOT_ID} .kokoro-status,
       #${ROOT_ID} .kokoro-preview {
         min-height: 32px;
-        padding: 8px;
-        border: 1px solid rgba(255, 255, 255, 0.11);
-        border-radius: 6px;
-        background: rgba(255, 255, 255, 0.06);
+        padding: 8px 10px;
+        border: 1px solid var(--kvs-border);
+        border-left-width: 3px;
+        border-radius: 8px;
+        background: var(--kvs-surface);
         color: #dbeafe;
         overflow-wrap: anywhere;
       }
 
+      #${ROOT_ID} .kokoro-preview {
+        max-height: 140px;
+        overflow: auto;
+        color: #cbd5e1;
+        font-size: 12px;
+      }
+
       #${ROOT_ID} .kokoro-status[data-tone="ok"] {
+        border-left-color: #22c55e;
         color: #bbf7d0;
       }
 
       #${ROOT_ID} .kokoro-status[data-tone="warn"] {
+        border-left-color: #f59e0b;
         color: #fde68a;
       }
 
       #${ROOT_ID} .kokoro-status[data-tone="error"] {
+        border-left-color: #ef4444;
         color: #fecaca;
+      }
+
+      #${ROOT_ID} .kokoro-resize {
+        position: absolute;
+        z-index: 2;
+        touch-action: none;
+      }
+
+      #${ROOT_ID} .kokoro-resize[data-resize="n"],
+      #${ROOT_ID} .kokoro-resize[data-resize="s"] {
+        left: 12px;
+        right: 12px;
+        height: 8px;
+        cursor: ns-resize;
+      }
+
+      #${ROOT_ID} .kokoro-resize[data-resize="e"],
+      #${ROOT_ID} .kokoro-resize[data-resize="w"] {
+        top: 12px;
+        bottom: 12px;
+        width: 8px;
+        cursor: ew-resize;
+      }
+
+      #${ROOT_ID} .kokoro-resize[data-resize="n"] { top: -4px; }
+      #${ROOT_ID} .kokoro-resize[data-resize="s"] { bottom: -4px; }
+      #${ROOT_ID} .kokoro-resize[data-resize="e"] { right: -4px; }
+      #${ROOT_ID} .kokoro-resize[data-resize="w"] { left: -4px; }
+
+      #${ROOT_ID} .kokoro-resize[data-resize="ne"],
+      #${ROOT_ID} .kokoro-resize[data-resize="nw"],
+      #${ROOT_ID} .kokoro-resize[data-resize="se"],
+      #${ROOT_ID} .kokoro-resize[data-resize="sw"] {
+        width: 16px;
+        height: 16px;
+      }
+
+      #${ROOT_ID} .kokoro-resize[data-resize="ne"] { top: -4px; right: -4px; cursor: nesw-resize; }
+      #${ROOT_ID} .kokoro-resize[data-resize="sw"] { bottom: -4px; left: -4px; cursor: nesw-resize; }
+      #${ROOT_ID} .kokoro-resize[data-resize="nw"] { top: -4px; left: -4px; cursor: nwse-resize; }
+      #${ROOT_ID} .kokoro-resize[data-resize="se"] { bottom: -4px; right: -4px; cursor: nwse-resize; }
+
+      #${ROOT_ID} .kokoro-resize[data-resize="se"]::after {
+        content: "";
+        position: absolute;
+        right: 7px;
+        bottom: 7px;
+        width: 8px;
+        height: 8px;
+        border-right: 2px solid var(--kvs-muted);
+        border-bottom: 2px solid var(--kvs-muted);
+        border-radius: 0 0 3px 0;
+        opacity: 0.6;
+      }
+
+      #${ROOT_ID}.kokoro-collapsed .kokoro-resize:not([data-resize="e"]):not([data-resize="w"]) {
+        display: none;
+      }
+
+      @container kvs (min-width: 640px) {
+        #${ROOT_ID} .kokoro-body {
+          grid-template-columns: minmax(260px, 1fr) minmax(0, 1.2fr);
+          align-content: stretch;
+        }
+      }
+
+      @container kvs (max-width: 330px) {
+        #${ROOT_ID} .kokoro-body {
+          padding: 10px;
+        }
+
+        #${ROOT_ID} .kokoro-controls {
+          gap: 4px;
+        }
+
+        #${ROOT_ID} .kokoro-controls button {
+          padding: 6px 4px;
+          font-size: 12px;
+        }
+
+        #${ROOT_ID} .kokoro-header-actions button {
+          min-width: 0;
+          padding: 5px 9px;
+        }
+      }
+
+      @media (max-width: 520px) {
+        #${ROOT_ID} {
+          right: ${PANEL_EDGE_MARGIN}px;
+          bottom: ${PANEL_EDGE_MARGIN}px;
+        }
+
+        #${ROOT_ID} .kokoro-resize {
+          display: none;
+        }
       }
     `);
 
     root = document.createElement('section');
     root.id = ROOT_ID;
     root.className = settings.collapsed ? 'kokoro-collapsed' : '';
+    root.setAttribute('aria-label', 'JanitorAI Voice Studio');
 
     const header = document.createElement('div');
     header.className = 'kokoro-header';
+    header.title = 'Drag to move. Double-click to reset size and position.';
+
+    const titleGroup = document.createElement('div');
+    titleGroup.className = 'kokoro-title-group';
 
     const title = document.createElement('div');
     title.className = 'kokoro-title';
     title.textContent = 'JanitorAI Voice Studio';
 
-    const collapseButton = createButton(settings.collapsed ? 'Open' : 'Hide', 'collapse');
-    collapseButton.style.width = '72px';
-    header.append(title, collapseButton);
+    miniStatusEl = document.createElement('div');
+    miniStatusEl.className = 'kokoro-mini-status';
+    miniStatusEl.setAttribute('aria-live', 'polite');
+    titleGroup.append(title, miniStatusEl);
+
+    const headerActions = document.createElement('div');
+    headerActions.className = 'kokoro-header-actions';
+    miniReadButtonEl = createButton('▶ Read', 'mini-read');
+    collapseButtonEl = createButton(settings.collapsed ? 'Open' : 'Hide', 'collapse');
+    headerActions.append(miniReadButtonEl, collapseButtonEl);
+    header.append(titleGroup, headerActions);
 
     const body = document.createElement('div');
     body.className = 'kokoro-body';
 
+    const mainColumn = document.createElement('div');
+    mainColumn.className = 'kokoro-col';
+
+    const sideColumn = document.createElement('div');
+    sideColumn.className = 'kokoro-col';
+
     const actionRow = document.createElement('div');
     actionRow.className = 'kokoro-row';
-    actionRow.append(
-      createButton('Read latest', 'read-latest'),
-      createButton('Read selected', 'read-selected'),
-    );
+    const readLatestButton = createButton('Read latest', 'read-latest');
+    readLatestButton.title = 'Read the latest bot message (Alt+Shift+R)';
+    const readSelectedButton = createButton('Read selected', 'read-selected');
+    readSelectedButton.title = 'Read the text currently selected on the page';
+    actionRow.append(readLatestButton, readSelectedButton);
 
     const actionRow2 = document.createElement('div');
     actionRow2.className = 'kokoro-row';
-    actionRow2.append(
-      createButton('Read box', 'read-box'),
-      createButton('Stop', 'stop'),
-    );
+    const readBoxButton = createButton('Read box', 'read-box');
+    readBoxButton.title = 'Read the contents of the text box';
+    const stopButton = createButton('Stop', 'stop');
+    stopButton.title = 'Stop generation and playback (Alt+Shift+S)';
+    actionRow2.append(readBoxButton, stopButton);
 
     const controller = document.createElement('div');
     controller.className = 'kokoro-controller';
@@ -2153,6 +2665,7 @@
     progressInputEl.max = '1000';
     progressInputEl.step = '1';
     progressInputEl.value = '0';
+    progressInputEl.setAttribute('aria-label', 'Playback position');
 
     timeEl = document.createElement('div');
     timeEl.className = 'kokoro-time';
@@ -2160,7 +2673,6 @@
 
     progressRow.append(progressInputEl, timeEl);
     controller.append(controlButtons, progressRow);
-    updatePlaybackControls();
 
     manualTextEl = document.createElement('textarea');
     manualTextEl.placeholder = 'Paste text here, including **bold**, *italics*, timestamps, narration, and dialogue.';
@@ -2251,12 +2763,23 @@
     mimoApiKeyFieldEl = createField('Mimo API key', mimoApiKeyInputEl);
     apiKeyFieldEl = createField('CPU Space API key', apiKeyInputEl);
     hfTokenFieldEl = createField('Hugging Face token', hfTokenInputEl);
+
+    const layoutRow = document.createElement('div');
+    layoutRow.className = 'kokoro-row';
+    const resetLayoutButton = createButton('Reset panel layout', 'reset-layout');
+    resetLayoutButton.title = 'Restore the default panel size and position';
+    const hint = document.createElement('div');
+    hint.className = 'kokoro-hint';
+    hint.textContent = 'Drag edges to resize. Alt+Shift+R reads latest, Alt+Shift+S stops (outside text fields).';
+    layoutRow.append(resetLayoutButton, hint);
+
     advancedBody.append(
       byokRowEl,
       openRouterApiKeyFieldEl,
       mimoApiKeyFieldEl,
       apiKeyFieldEl,
       hfTokenFieldEl,
+      layoutRow,
     );
 
     advanced.append(advancedSummary, advancedBody);
@@ -2264,25 +2787,55 @@
     statusEl = document.createElement('div');
     statusEl.className = 'kokoro-status';
     statusEl.dataset.tone = 'info';
-    statusEl.textContent = `Ready. v${USER_SCRIPT_VERSION}`;
+    statusEl.setAttribute('aria-live', 'polite');
 
     latestPreviewEl = document.createElement('div');
     latestPreviewEl.className = 'kokoro-preview';
     latestPreviewEl.textContent = 'Text preview and character count appear here.';
 
-    body.append(
+    const textField = createField('Text box', manualTextEl);
+    textField.classList.add('kokoro-text-field');
+
+    mainColumn.append(
       actionRow,
       actionRow2,
       controller,
-      createField('Text box', manualTextEl),
+      statusEl,
       settingsRow,
       advanced,
-      statusEl,
+    );
+    sideColumn.append(
+      textField,
       latestPreviewEl,
     );
+    body.append(mainColumn, sideColumn);
 
-    root.append(header, body);
+    const resizeHandles = RESIZE_DIRECTIONS.map((direction) => {
+      const handle = document.createElement('div');
+      handle.className = 'kokoro-resize';
+      handle.dataset.resize = direction;
+      handle.setAttribute('aria-hidden', 'true');
+      handle.addEventListener('pointerdown', (event) => {
+        startPanelResize(event, handle);
+      });
+      handle.addEventListener('pointermove', resizePanel);
+      handle.addEventListener('pointerup', (event) => {
+        stopPanelResize(event, handle);
+      });
+      handle.addEventListener('pointercancel', (event) => {
+        stopPanelResize(event, handle);
+      });
+      return handle;
+    });
+
+    root.append(header, body, ...resizeHandles);
     document.body.append(root);
+    setStatus(`Ready. v${USER_SCRIPT_VERSION}`, 'info');
+    updatePlaybackControls();
+    restorePanelLayout();
+    if (collapseButtonEl) {
+      collapseButtonEl.setAttribute('aria-expanded', String(!settings.collapsed));
+    }
 
     header.addEventListener('pointerdown', (event) => {
       startPanelDrag(event, header);
@@ -2296,6 +2849,11 @@
 
     header.addEventListener('pointercancel', (event) => {
       stopPanelDrag(event, header);
+    });
+
+    header.addEventListener('dblclick', (event) => {
+      if (event.target?.closest?.('button')) return;
+      resetPanelLayout();
     });
 
     window.addEventListener('resize', keepPanelInViewport);
@@ -2382,11 +2940,21 @@
 
       const action = button.dataset.action;
       if (action === 'collapse') {
-        settings.collapsed = !settings.collapsed;
-        root.classList.toggle('kokoro-collapsed', settings.collapsed);
-        button.textContent = settings.collapsed ? 'Open' : 'Hide';
-        saveSettings();
-        requestAnimationFrame(keepPanelInViewport);
+        setCollapsed(!settings.collapsed);
+        return;
+      }
+
+      if (action === 'mini-read') {
+        if (isAudioActive()) {
+          stopPlayback();
+          return;
+        }
+        await readLatestMessage();
+        return;
+      }
+
+      if (action === 'reset-layout') {
+        resetPanelLayout();
         return;
       }
 
@@ -2418,10 +2986,7 @@
       }
 
       if (action === 'read-latest') {
-        if (!await prepareAudioFromClick()) return;
-        saveFromControls();
-        if (!settings.useByok) await loadVoices();
-        await speakText(findLatestText(), 'latest message');
+        await readLatestMessage();
         return;
       }
 
@@ -2444,9 +3009,35 @@
       }
     });
 
+    document.addEventListener('keydown', (event) => {
+      if (!event.altKey || !event.shiftKey || event.ctrlKey || event.metaKey || event.repeat) return;
+
+      const key = event.code === 'KeyR' ? 'r' : event.code === 'KeyS' ? 's' : '';
+      if (!key) return;
+
+      const target = event.target;
+      if (
+        isElementNode(target)
+        && target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]')
+      ) return;
+
+      event.preventDefault();
+      if (key === 's') {
+        stopPlayback();
+      } else if (!isBusy) {
+        readLatestMessage();
+      }
+    }, true);
+
     document.addEventListener('selectionchange', updateRememberedSelection);
     document.addEventListener('keyup', updateRememberedSelection, true);
     document.addEventListener('pointerup', updateRememberedSelection, true);
+
+    new MutationObserver(scheduleLatestPreviewRefresh).observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
 
     findLatestText();
     loadProviderVoices();
