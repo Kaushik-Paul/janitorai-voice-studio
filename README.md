@@ -218,6 +218,20 @@ Choose one mode:
 
 Only the credential used by the selected mode is shown. Credentials and the
 other panel settings are stored in the userscript's browser `localStorage`.
+
+### Panel controls
+
+- `Hide` collapses the panel to a single bar. The bar keeps a `Read` button
+  that reads the latest bot message and turns into `Stop` while audio is
+  generating or playing. The bar also shows the current status and a thin
+  playback progress line.
+- Drag the header to move the panel. Drag any edge or corner to resize it.
+  At 640px wide or more, the text box moves into a second column.
+- The panel saves its size and position. To restore the defaults,
+  double-click the header or use `Reset panel layout` under `Advanced`.
+- `Alt+Shift+R` reads the latest bot message. `Alt+Shift+S` stops. These
+  shortcuts do nothing while focus is in a text field.
+- The preview of the latest bot message updates as new messages arrive.
 Treat the browser profile and exported userscript data as sensitive.
 
 The userscript metadata already permits these hosts:
