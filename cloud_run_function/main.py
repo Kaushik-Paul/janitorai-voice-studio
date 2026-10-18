@@ -73,6 +73,11 @@ SPACES = (
         "https://kaushikpaul-open-webui-surplus.hf.space/health",
         requires_auth=True,
     ),
+    Space(
+        "keka-attendance",
+        "https://kaushikpaul-keka-attendance.hf.space/healthz",
+        requires_auth=True,
+    ),
 )
 
 
