@@ -1,6 +1,6 @@
 # Hugging Face Space keep-alive
 
-This HTTP Cloud Run function sends a lightweight request to twelve Hugging Face
+This HTTP Cloud Run function sends a lightweight request to fourteen Hugging Face
 Spaces. It uses each CPU API's `/health` route, Gradio's `/config` route where
 available, Open WebUI's `/health` route, Keka Attendance's `/healthz` route,
 and the `HF-Drive`,
@@ -10,9 +10,9 @@ inference, download media, or consume ZeroGPU quota.
 
 The deployed service is private. Cloud Scheduler invokes it with OIDC at
 `08:00 Asia/Kolkata` each day. The Hugging Face token used for the private
-`Manga-Translator-OCR_Copy`, `HF-Drive`, `Open-WebUI-Surplus`, and
-`keka-attendance` Spaces is
-injected from Secret Manager.
+`Manga-Translator-OCR_Copy`, `manga-scenegen`, `HF-Drive`,
+`Open-WebUI-Surplus`, and `keka-attendance` Spaces is injected from Secret
+Manager.
 
 ## Local tests
 
