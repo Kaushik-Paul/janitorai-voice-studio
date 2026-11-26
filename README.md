@@ -83,10 +83,11 @@ The private Cloud Run function `hf-space-keepalive` is deployed in
 `asia-south1` in project `adept-fountain-349605`. Cloud Scheduler job
 `hf-space-keepalive-daily` invokes it every day at **08:00 Asia/Kolkata** to
 ping the Kokoro CPU/ZeroGPU, NeuTTS Air CPU/ZeroGPU, two Manga Translator,
-HF-Drive, Dlp-Video-Downloader, Media Toolbox GPU/CPU, and Open WebUI Surplus
-Spaces without running model inference or downloading media. Scheduler uses
-OIDC, and the token for the private Manga copy, HF-Drive, and Open WebUI
-Surplus Spaces is stored in Secret Manager.
+`manga-colorization`, `manga-scenegen`, HF-Drive, Dlp-Video-Downloader, Media
+Toolbox GPU/CPU, Open WebUI Surplus, and Keka Attendance Spaces without running
+model inference or downloading media. Scheduler uses OIDC, and the token for
+the private Manga copy, `manga-scenegen`, HF-Drive, Open WebUI Surplus, and Keka
+Attendance Spaces is stored in Secret Manager.
 
 Run an immediate check with:
 
