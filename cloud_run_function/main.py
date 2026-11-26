@@ -56,11 +56,6 @@ SPACES = (
         "https://kaushikpaul-manga-colorization.hf.space/config",
     ),
     Space(
-        "manga-scenegen",
-        "https://kaushikpaul-manga-scenegen.hf.space/config",
-        requires_auth=True,
-    ),
-    Space(
         "HF-Drive",
         "https://kaushikpaul-hf-drive.hf.space/",
         requires_auth=True,
